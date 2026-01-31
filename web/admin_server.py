@@ -1,72 +1,17 @@
 import socket
 import time
 import ubinascii
-import uhashlib
 import machine
+import json
 
-try:
-    import urandom as _urandom
-except Exception:
-    import random as _urandom
-
-from .admin_forms import (
-    apply_api_form,
-    apply_sensor_form,
-    apply_system_form,
-    apply_wifi_form,
-    build_api_fields,
-    build_sensor_fields,
-    build_system_fields,
-    build_wifi_fields,
-    parse_form,
-)
-from .admin_views import (
-    render_form_page,
-    render_log_page,
-    render_login_page,
-    render_status_page,
-)
-
-
-# 取得隨機位元組
-def _rand_bytes(length):
-    out = []
-    for _ in range(length):
-        try:
-            out.append(_urandom.getrandbits(8))
-        except Exception:
-            out.append(_urandom.randrange(256))
-    return bytes(out)
-
-
-# 產生密碼雜湊
-def _hash_password(password, salt_hex):
-    salt = ubinascii.unhexlify(salt_hex.encode())
-    h = uhashlib.sha256()
-    h.update(salt)
-    h.update(password.encode())
-    return ubinascii.hexlify(h.digest()).decode()
-
-
-# 取得隨機 Salt（Hex）
-def _generate_salt_hex():
-    return ubinascii.hexlify(_rand_bytes(16)).decode()
+from .routes import dispatch_request
+from .security import _generate_salt_hex, _hash_password, _rand_bytes
+from .http_utils import read_request, send_response, redirect
 
 
 # 檢查 Session 是否過期
 def _session_expired(expires_ms):
     return time.ticks_diff(time.ticks_ms(), expires_ms) >= 0
-
-
-# 取得 HTTP 狀態文字
-def _status_text(code):
-    mapping = {
-        200: "OK",
-        302: "Found",
-        400: "Bad Request",
-        404: "Not Found",
-    }
-    return mapping.get(code, "OK")
 
 
 class AdminServer:
@@ -81,10 +26,19 @@ class AdminServer:
         self._message = ""
         self._restart_required = False
         self._reset_prompt = False
+        self._pending_save = None
+        self._query = ""
         self._apply_runtime_config()
 
         self._sock = socket.socket()
-        self._sock.bind((self._cfg["web"]["host"], self._cfg["web"]["port"]))
+        # 使用 getaddrinfo 取得可用綁定位址
+        try:
+            addr = socket.getaddrinfo(
+                self._cfg["web"]["host"], self._cfg["web"]["port"]
+            )[0][-1]
+        except Exception:
+            addr = (self._cfg["web"]["host"], self._cfg["web"]["port"])
+        self._sock.bind(addr)
         self._sock.listen(1)
         self._sock.settimeout(0)
         self._log(
@@ -143,65 +97,15 @@ class AdminServer:
 
     # 讀取 HTTP 請求
     def _read_request(self, client):
-        data = b""
-        while b"\r\n\r\n" not in data:
-            try:
-                chunk = client.recv(512)
-            except OSError:
-                return None
-            if not chunk:
-                break
-            data += chunk
-            if len(data) > self._max_request_size:
-                return None
-
-        if b"\r\n\r\n" in data:
-            header, body = data.split(b"\r\n\r\n", 1)
-        else:
-            header, body = data, b""
-
-        lines = header.decode("utf-8", "ignore").split("\r\n")
-        if not lines or len(lines[0].split()) < 2:
-            return None
-        method, path = lines[0].split()[:2]
-        headers = {}
-        for line in lines[1:]:
-            if ":" in line:
-                key, value = line.split(":", 1)
-                headers[key.strip()] = value.strip()
-
-        content_length = int(headers.get("Content-Length", "0") or 0)
-        if content_length > self._max_request_size:
-            return None
-        while len(body) < content_length:
-            try:
-                body += client.recv(content_length - len(body))
-            except OSError:
-                return None
-
-        return method, path, headers, body.decode("utf-8", "ignore")
+        return read_request(client, self._max_request_size)
 
     # 回傳 HTTP 內容
     def _send_response(self, client, status, headers, body):
-        if body is None:
-            body = ""
-        if "Connection" not in headers:
-            headers["Connection"] = "close"
-        body_bytes = body.encode("utf-8")
-        header_lines = ["HTTP/1.1 {} {}".format(status, _status_text(status))]
-        for key, value in headers.items():
-            header_lines.append("{}: {}".format(key, value))
-        header_lines.append("Content-Length: {}".format(len(body_bytes)))
-        header_lines.append("\r\n")
-        try:
-            client.send("\r\n".join(header_lines).encode("utf-8") + body_bytes)
-        except OSError:
-            return
+        send_response(client, status, headers, body)
 
     # 回傳重新導向
     def _redirect(self, client, location):
-        headers = {"Location": location}
-        self._send_response(client, 302, headers, "")
+        redirect(client, location)
 
     # 儲存設定並同步記憶體
     def _save_config_data(self):
@@ -212,6 +116,51 @@ class AdminServer:
         if self._logger:
             self._logger.refresh()
 
+    # 複製設定供備份
+    def _clone_config(self):
+        try:
+            return json.loads(json.dumps(self._cfg))
+        except Exception:
+            try:
+                return dict(self._cfg)
+            except Exception:
+                return {}
+
+    # 套用密碼更新（系統頁）
+    def _apply_password_change(self, form):
+        current_pwd = form.get("admin_current_password", "")
+        new_pwd = form.get("admin_new_password", "")
+        new_pwd2 = form.get("admin_new_password2", "")
+
+        if not new_pwd and not new_pwd2:
+            return True, "", False
+
+        if not new_pwd or new_pwd != new_pwd2:
+            return False, "新密碼不一致", False
+
+        if self._has_password():
+            salt_hex = self._cfg["admin"]["password_salt"]
+            pwd_hash = _hash_password(current_pwd, salt_hex) if current_pwd else ""
+            if pwd_hash != self._cfg["admin"]["password_hash"]:
+                return False, "當前密碼錯誤", False
+
+        salt_hex = _generate_salt_hex()
+        self._cfg["admin"]["password_salt"] = salt_hex
+        self._cfg["admin"]["password_hash"] = _hash_password(new_pwd, salt_hex)
+        return True, "密碼已更新，請重新登入", True
+
+    # 取得模板下載連結
+    def _template_download_url(self):
+        return self._base_path + "/template?source=current"
+
+    # 設定暫存更新
+    def _set_pending_save(self, subpath, form):
+        self._pending_save = {"path": subpath, "form": form}
+
+    # 清除暫存更新
+    def _clear_pending_save(self):
+        self._pending_save = None
+
     # 主輪詢處理
     def poll(self):
         try:
@@ -219,6 +168,7 @@ class AdminServer:
         except Exception:
             return
 
+        self._client = client
         try:
             client.settimeout(5)
             try:
@@ -229,295 +179,36 @@ class AdminServer:
                 return
 
             method, path, headers, body = req
+            self._query = ""
+            if "?" in path:
+                path_only, self._query = path.split("?", 1)
+            else:
+                path_only = path
             if path == "/":
                 self._redirect(client, self._base_path + "/")
                 return
 
-            if not path.startswith(self._base_path):
+            # 允許直接從根路徑存取 /status
+            if path_only in ("/status", "/status/") and method == "GET":
+                handled = dispatch_request(self, method, "/status", headers, body)
+                if not handled:
+                    self._send_response(
+                        client, 404, {"Content-Type": "text/plain"}, "Not Found"
+                    )
+                return
+
+            if not path_only.startswith(self._base_path):
                 self._send_response(
                     client, 404, {"Content-Type": "text/plain"}, "Not Found"
                 )
                 return
 
-            subpath = path[len(self._base_path) :] or "/"
-            is_authed = self._is_authed(headers)
-            has_password = self._has_password()
-
-            if subpath in ("/login", "/login/"):
-                if method == "GET":
-                    if is_authed and has_password:
-                        self._redirect(client, self._base_path + "/")
-                        return
-                    html = render_login_page(
-                        self._base_path, self._message, not has_password
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-
-                if method == "POST":
-                    form = parse_form(body)
-                    if not has_password:
-                        pwd = form.get("password", "")
-                        pwd2 = form.get("password2", "")
-                        if not pwd or pwd != pwd2:
-                            self._message = "密碼不一致"
-                            html = render_login_page(
-                                self._base_path, self._message, True
-                            )
-                            self._message = ""
-                            self._send_response(
-                                client, 200, {"Content-Type": "text/html"}, html
-                            )
-                            return
-                        salt_hex = _generate_salt_hex()
-                        self._cfg["admin"]["password_salt"] = salt_hex
-                        self._cfg["admin"]["password_hash"] = _hash_password(
-                            pwd, salt_hex
-                        )
-                        self._save_config(self._cfg)
-                        self._log("Admin password set")
-                        self._message = "密碼已設定，請登入"
-                        html = render_login_page(
-                            self._base_path, self._message, False
-                        )
-                        self._message = ""
-                        self._send_response(
-                            client, 200, {"Content-Type": "text/html"}, html
-                        )
-                        return
-                    pwd = form.get("password", "")
-                    salt_hex = self._cfg["admin"]["password_salt"]
-                    pwd_hash = _hash_password(pwd, salt_hex) if pwd else ""
-                    if pwd_hash != self._cfg["admin"]["password_hash"]:
-                        self._message = "密碼錯誤"
-                        self._log("Admin login failed")
-                        html = render_login_page(
-                            self._base_path, self._message, False
-                        )
-                        self._message = ""
-                        self._send_response(
-                            client, 200, {"Content-Type": "text/html"}, html
-                        )
-                        return
-                    token = self._new_session()
-                    self._log("Admin login success")
-                    headers = {
-                        "Set-Cookie": "SID={}; Max-Age={}; Path={}; HttpOnly".format(
-                            token, self._session_ttl_s, self._base_path
-                        ),
-                        "Location": self._base_path + "/",
-                    }
-                    self._send_response(client, 302, headers, "")
-                    return
-
-            if subpath in ("/logout", "/logout/"):
-                self._clear_session()
-                self._log("Admin logout")
-                headers = {
-                    "Set-Cookie": "SID=; Max-Age=0; Path={}; HttpOnly".format(
-                        self._base_path
-                    ),
-                    "Location": self._base_path + "/login",
-                }
-                self._send_response(client, 302, headers, "")
-                return
-
-            if has_password and not is_authed:
-                self._redirect(client, self._base_path + "/login")
-                return
-
-            if subpath in ("/", ""):
-                html = render_status_page(
-                    self._base_path,
-                    self._status,
-                    self._message,
-                    self._restart_required,
-                )
-                self._message = ""
-                self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                return
-
-            if subpath in ("/reset", "/reset/") and method == "POST":
-                self._log("Device reset requested")
-                self._reset_prompt = False
+            subpath = path_only[len(self._base_path) :] or "/"
+            handled = dispatch_request(self, method, subpath, headers, body)
+            if not handled:
                 self._send_response(
-                    client,
-                    200,
-                    {"Content-Type": "text/html"},
-                    render_status_page(
-                        self._base_path,
-                        self._status,
-                        "裝置即將重啟",
-                        self._restart_required,
-                    ),
+                    client, 404, {"Content-Type": "text/plain"}, "Not Found"
                 )
-                time.sleep(1)
-                machine.reset()
-                return
-
-            if subpath in ("/reset-dismiss", "/reset-dismiss/") and method == "POST":
-                self._reset_prompt = False
-                self._message = "已稍後重啟"
-                self._redirect(client, self._base_path + "/")
-                return
-
-            if subpath.startswith("/wifi"):
-                if method == "GET":
-                    fields = build_wifi_fields(self._cfg)
-                    html = render_form_page(
-                        self._base_path,
-                        "網路設定",
-                        self._base_path + "/wifi",
-                        fields,
-                        self._message,
-                        reset_prompt=self._reset_prompt,
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-                if method == "POST":
-                    form = parse_form(body)
-                    ok, msg = apply_wifi_form(self._cfg, form)
-                    if ok:
-                        self._save_config_data()
-                        self._log("Config updated: wifi")
-                    self._message = msg
-                    fields = build_wifi_fields(self._cfg)
-                    html = render_form_page(
-                        self._base_path,
-                        "網路設定",
-                        self._base_path + "/wifi",
-                        fields,
-                        self._message,
-                        reset_prompt=self._reset_prompt,
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-
-            if subpath.startswith("/api"):
-                if method == "GET":
-                    fields = build_api_fields(self._cfg)
-                    html = render_form_page(
-                        self._base_path,
-                        "API 設定",
-                        self._base_path + "/api",
-                        fields,
-                        self._message,
-                        reset_prompt=self._reset_prompt,
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-                if method == "POST":
-                    form = parse_form(body)
-                    ok, msg = apply_api_form(self._cfg, form)
-                    if ok:
-                        self._save_config_data()
-                        self._log("Config updated: api")
-                    self._message = msg
-                    fields = build_api_fields(self._cfg)
-                    html = render_form_page(
-                        self._base_path,
-                        "API 設定",
-                        self._base_path + "/api",
-                        fields,
-                        self._message,
-                        reset_prompt=self._reset_prompt,
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-
-            if subpath.startswith("/sensors"):
-                if method == "GET":
-                    fields = build_sensor_fields(self._cfg)
-                    html = render_form_page(
-                        self._base_path,
-                        "感測器設定",
-                        self._base_path + "/sensors",
-                        fields,
-                        self._message,
-                        reset_prompt=self._reset_prompt,
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-                if method == "POST":
-                    form = parse_form(body)
-                    ok, msg = apply_sensor_form(self._cfg, form)
-                    if ok:
-                        self._save_config_data()
-                        self._log("Config updated: sensors")
-                    self._message = msg
-                    fields = build_sensor_fields(self._cfg)
-                    html = render_form_page(
-                        self._base_path,
-                        "感測器設定",
-                        self._base_path + "/sensors",
-                        fields,
-                        self._message,
-                        reset_prompt=self._reset_prompt,
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-
-            if subpath.startswith("/system"):
-                if method == "GET":
-                    fields = build_system_fields(self._cfg)
-                    html = render_form_page(
-                        self._base_path,
-                        "系統設定",
-                        self._base_path + "/system",
-                        fields,
-                        self._message,
-                        reset_prompt=self._reset_prompt,
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-                if method == "POST":
-                    form = parse_form(body)
-                    ok, msg = apply_system_form(self._cfg, form)
-                    if ok:
-                        self._save_config_data()
-                        self._log("Config updated: system")
-                    self._message = msg
-                    fields = build_system_fields(self._cfg)
-                    html = render_form_page(
-                        self._base_path,
-                        "系統設定",
-                        self._base_path + "/system",
-                        fields,
-                        self._message,
-                        reset_prompt=self._reset_prompt,
-                    )
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-
-            if subpath.startswith("/logs"):
-                if method == "GET":
-                    lines = self._logger.read_tail() if self._logger else []
-                    html = render_log_page(self._base_path, lines, self._message)
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-                if method == "POST":
-                    form = parse_form(body)
-                    if form.get("action") == "clear" and self._logger:
-                        self._logger.clear()
-                        self._log("Log cleared")
-                        self._message = "Log 已清除"
-                    lines = self._logger.read_tail() if self._logger else []
-                    html = render_log_page(self._base_path, lines, self._message)
-                    self._message = ""
-                    self._send_response(client, 200, {"Content-Type": "text/html"}, html)
-                    return
-
-            self._send_response(client, 404, {"Content-Type": "text/plain"}, "Not Found")
         finally:
             try:
                 client.close()

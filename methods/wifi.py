@@ -2,6 +2,8 @@ import time
 import machine
 import network
 
+from .utils import safe_print
+
 
 # 檢查 SSID 是否有效
 def _ssid_valid(ssid):
@@ -129,7 +131,7 @@ def start_ap(cfg, log_fn=None):
                 force_open,
             )
         )
-    print("AP started:", ap.ifconfig())
+    safe_print("AP started:", ap.ifconfig())
     return ap
 
 
@@ -142,37 +144,40 @@ def connect_wifi_with_credentials(
         wlan.active(True)
         if use_static_ip:
             wlan.ifconfig(tuple(static_ifcfg))
-        wlan.disconnect()
+        try:
+            wlan.disconnect()
+        except Exception:
+            pass
         time.sleep(0.5)
 
-        print("Connecting to {}...".format(ssid))
+        safe_print("Connecting to {}...".format(ssid))
         if log_fn:
             log_fn("Connecting to WiFi: {}".format(ssid))
         wlan.connect(ssid, password)
 
         t0 = time.ticks_ms()
         while not wlan.isconnected() and time.ticks_diff(time.ticks_ms(), t0) < 15000:
-            print(".", end="")
+            safe_print(".", end="")
             time.sleep(0.5)
 
         if wlan.isconnected():
-            print("\nWiFi connected to {}: {}".format(ssid, wlan.ifconfig()))
+            safe_print("\nWiFi connected to {}: {}".format(ssid, wlan.ifconfig()))
             if log_fn:
                 log_fn("WiFi connected: {}".format(ssid))
             return True
-        print("\nFailed to connect to {}".format(ssid))
+        safe_print("\nFailed to connect to {}".format(ssid))
         if log_fn:
             log_fn("WiFi connect failed: {}".format(ssid))
         return False
     except Exception as e:
-        print("\nConnection error: {}".format(e))
+        safe_print("\nConnection error: {}".format(e))
         if log_fn:
             log_fn("WiFi connect error: {}".format(e))
         return False
 
 
 # 交替嘗試主備 Wi-Fi 直到連線成功
-def connect_wifi(cfg, set_led_color, log_fn=None):
+def connect_wifi(cfg, log_fn=None):
     wifi_failures = 0
     connection_attempts = 0
 
@@ -183,7 +188,7 @@ def connect_wifi(cfg, set_led_color, log_fn=None):
     backup_ok = _ssid_valid(backup_cfg.get("ssid", ""))
 
     if not primary_ok and not backup_ok:
-        print("No WiFi SSID set, starting AP mode...")
+        safe_print("No WiFi SSID set, starting AP mode...")
         if log_fn:
             log_fn("No SSID, switching to AP mode")
         start_ap(cfg, log_fn=log_fn)
@@ -195,13 +200,12 @@ def connect_wifi(cfg, set_led_color, log_fn=None):
         connection_attempts += 1
 
         if connection_attempts > wifi_cfg["max_connection_attempts"]:
-            print("Too many connection attempts, performing soft reset...")
-            set_led_color(10, 10, 0)
+            safe_print("Too many connection attempts, performing soft reset...")
             time.sleep(2)
             machine.reset()
 
         if use_primary and primary_ok:
-            print("Attempting primary WiFi ({})...".format(connection_attempts))
+            safe_print("Attempting primary WiFi ({})...".format(connection_attempts))
             if connect_wifi_with_credentials(
                 primary_cfg["ssid"],
                 primary_cfg["password"],
@@ -211,9 +215,9 @@ def connect_wifi(cfg, set_led_color, log_fn=None):
             ):
                 wifi_failures = 0
                 return "sta"
-            print("Primary WiFi failed")
+            safe_print("Primary WiFi failed")
         elif backup_ok:
-            print("Attempting backup WiFi ({})...".format(connection_attempts))
+            safe_print("Attempting backup WiFi ({})...".format(connection_attempts))
             if connect_wifi_with_credentials(
                 backup_cfg["ssid"],
                 backup_cfg["password"],
@@ -223,9 +227,9 @@ def connect_wifi(cfg, set_led_color, log_fn=None):
             ):
                 wifi_failures = 0
                 return "sta"
-            print("Backup WiFi failed")
+            safe_print("Backup WiFi failed")
         else:
-            print("No available WiFi credentials, starting AP mode...")
+            safe_print("No available WiFi credentials, starting AP mode...")
             if log_fn:
                 log_fn("No SSID, switching to AP mode")
             start_ap(cfg, log_fn=log_fn)
@@ -235,18 +239,17 @@ def connect_wifi(cfg, set_led_color, log_fn=None):
         if primary_ok and backup_ok:
             use_primary = not use_primary
 
-        if wifi_failures >= wifi_cfg["reset_after_failures"]:
-            print(
+        reset_after_failures = int(wifi_cfg.get("reset_after_failures", 0) or 0)
+        if reset_after_failures > 0 and wifi_failures >= reset_after_failures:
+            safe_print(
                 "WiFi failed {} times, performing soft reset...".format(wifi_failures)
             )
-            set_led_color(10, 0, 10)
             time.sleep(2)
             machine.reset()
 
-        print(
+        safe_print(
             "WiFi failed (failures: {}), retrying in 3 seconds...".format(
                 wifi_failures
             )
         )
-        set_led_color(10, 0, 0)
         time.sleep(3)
