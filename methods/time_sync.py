@@ -24,10 +24,19 @@ _MONTH = {
 def _http_head_date(host):
     try:
         url = "http://" + host
-        r = urequests.head(url)
-        if "Date" in r.headers:
-            return r.headers["Date"]
-        r.close()
+        try:
+            r = urequests.request("HEAD", url)
+        except Exception:
+            r = urequests.get(url)
+        try:
+            if hasattr(r, "headers") and "Date" in r.headers:
+                return r.headers["Date"]
+            return None
+        finally:
+            try:
+                r.close()
+            except Exception:
+                pass
     except Exception as e:
         safe_print("[HTTP-TIME] error:", e)
     return None

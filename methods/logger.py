@@ -13,6 +13,7 @@ class Logger:
         self._enabled = False
         self._file = "logs.txt"
         self._max_lines = 30000
+        self._trim_to_lines = 10000
         self._view_lines = 200
         self._view_max_chars = 4096
         self._timezone_offset_s = 0
@@ -25,6 +26,11 @@ class Logger:
         self._enabled = bool(log_cfg.get("enabled", True))
         self._file = log_cfg.get("file", "logs.txt")
         self._max_lines = int(log_cfg.get("max_lines", 30000))
+        self._trim_to_lines = int(log_cfg.get("trim_to_lines", 10000))
+        if self._trim_to_lines <= 0:
+            self._trim_to_lines = self._max_lines
+        if self._trim_to_lines > self._max_lines:
+            self._trim_to_lines = self._max_lines
         self._view_lines = int(log_cfg.get("view_lines", 200))
         self._view_max_chars = int(log_cfg.get("view_max_chars", 4096))
         self._timezone_offset_s = int(
@@ -49,7 +55,8 @@ class Logger:
             self._line_count = count
             return
 
-        skip = count - self._max_lines
+        keep_lines = min(self._trim_to_lines, self._max_lines)
+        skip = max(0, count - keep_lines)
         tmp_file = self._file + ".tmp"
         try:
             with open(self._file, "r") as src, open(tmp_file, "w") as dst:
@@ -64,7 +71,7 @@ class Logger:
             except Exception:
                 pass
             os.rename(tmp_file, self._file)
-            self._line_count = self._max_lines
+            self._line_count = keep_lines
         except Exception:
             self._line_count = None
 
@@ -123,3 +130,56 @@ class Logger:
     # 取得顯示行數
     def get_view_lines(self):
         return self._view_lines
+
+    # 取得顯示字數上限
+    def get_view_max_chars(self):
+        return self._view_max_chars
+
+    # 讀取分頁 Log（由最新頁往前翻）
+    def read_tail_page(self, page=0, lines=None, max_chars=None):
+        if lines is None:
+            lines = self._view_lines
+        if max_chars is None:
+            max_chars = self._view_max_chars
+
+        try:
+            page = int(page)
+        except Exception:
+            page = 0
+        page = max(0, page)
+
+        per_page = max(1, int(lines))
+        cap_lines = per_page * (page + 1)
+        cap_chars = max(0, int(max_chars))
+
+        buffer = []
+        total_len = 0
+        dropped = False
+        try:
+            with open(self._file, "r") as f:
+                for line in f:
+                    text = line.rstrip()
+                    buffer.append(text)
+                    total_len += len(text) + 1
+                    while buffer and (
+                        len(buffer) > cap_lines
+                        or (cap_chars and total_len > cap_chars)
+                    ):
+                        removed = buffer.pop(0)
+                        total_len -= len(removed) + 1
+                        dropped = True
+        except Exception:
+            return [], False, 0
+
+        if not dropped:
+            max_page = max(0, (len(buffer) - 1) // per_page) if buffer else 0
+            page = min(page, max_page)
+            cap_lines = per_page * (page + 1)
+
+        start = max(0, len(buffer) - cap_lines)
+        end = len(buffer) - page * per_page
+        start = max(0, end - per_page)
+        lines_out = buffer[start:end] if buffer else []
+
+        has_next = dropped
+        return lines_out, has_next, page
