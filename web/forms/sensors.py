@@ -5,6 +5,7 @@ from .common import _to_float, _to_int, _to_bool
 # 建立感測器表單欄位
 def build_sensor_fields(cfg):
     adc = cfg.get("adc", {})
+    mcp_cfg = cfg.get("mcp3208", {})
     ph = cfg.get("ph", {})
     turb = cfg.get("turbidity", {})
     mq = cfg.get("mq", {})
@@ -12,6 +13,7 @@ def build_sensor_fields(cfg):
     tds = cfg.get("tds", {})
     ec = cfg.get("ec", {})
     orp = cfg.get("orp", {})
+    mcp_enabled = bool(mcp_cfg.get("enabled", False))
     web_cfg = cfg.get("web", {})
     base_path = "/" + web_cfg.get("base_path", "admin").strip("/")
     data_url = base_path + "/calibration/data"
@@ -24,8 +26,53 @@ def build_sensor_fields(cfg):
             "input": "number",
             "step": "0.01",
         },
+        {"type": "section", "label": "MCP3208"},
+        {
+            "label": "MCP3208 啟用",
+            "name": "mcp3208_enabled",
+            "value": "1" if mcp_cfg.get("enabled") else "0",
+            "input": "select",
+            "options": [("1", "On"), ("0", "Off")],
+        },
+        {
+            "label": "MCP3208 SPI ID",
+            "name": "mcp3208_spi_id",
+            "value": mcp_cfg.get("spi_id", 2),
+            "input": "number",
+        },
+        {
+            "label": "MCP3208 傳輸速率",
+            "name": "mcp3208_baudrate",
+            "value": mcp_cfg.get("baudrate", 1000000),
+            "input": "number",
+        },
+        {
+            "label": "MCP3208 SCK 腳位",
+            "name": "mcp3208_sck",
+            "value": mcp_cfg.get("sck", 12),
+            "input": "number",
+        },
+        {
+            "label": "MCP3208 MOSI 腳位",
+            "name": "mcp3208_mosi",
+            "value": mcp_cfg.get("mosi", 11),
+            "input": "number",
+        },
+        {
+            "label": "MCP3208 MISO 腳位",
+            "name": "mcp3208_miso",
+            "value": mcp_cfg.get("miso", 13),
+            "input": "number",
+        },
+        {
+            "label": "MCP3208 CS 腳位",
+            "name": "mcp3208_cs",
+            "value": mcp_cfg.get("cs", 14),
+            "input": "number",
+        },
         {"type": "section", "label": "pH"},
-        {"label": "pH 腳位", "name": "ph_pin", "value": ph.get("pin", 0), "input": "number"},
+        {"label": "pH 腳位", "name": "ph_pin", "value": ph.get("pin", 0), "input": "number", "disabled": mcp_enabled},
+        {"label": "pH CH", "name": "ph_ch", "value": ph.get("ch", 0), "input": "number", "disabled": not mcp_enabled},
         {"label": "pH 最小值", "name": "ph_min", "value": ph.get("min", 0.0), "input": "number", "step": "0.01"},
         {"label": "pH 最大值", "name": "ph_max", "value": ph.get("max", 14.0), "input": "number", "step": "0.01"},
         {"label": "平滑視窗", "name": "ph_smoothing_window", "value": ph.get("smoothing_window", 5), "input": "number"},
@@ -39,7 +86,8 @@ def build_sensor_fields(cfg):
         {"label": "分壓電阻下 (Ohm)", "name": "ph_divider_r_bot", "value": ph.get("divider", {}).get("r_bot", 0), "input": "number"},
         {"label": "pH 除錯輸出", "name": "ph_debug", "value": "1" if ph.get("debug", False) else "0", "input": "select", "options": [("1", "啟用"), ("0", "停用")]},
         {"type": "section", "label": "濁度"},
-        {"label": "濁度腳位", "name": "turbidity_pin", "value": turb.get("pin", 0), "input": "number"},
+        {"label": "濁度腳位", "name": "turbidity_pin", "value": turb.get("pin", 0), "input": "number", "disabled": mcp_enabled},
+        {"label": "Turbidity CH", "name": "turbidity_ch", "value": turb.get("ch", 0), "input": "number", "disabled": not mcp_enabled},
         {"label": "空氣閾值", "name": "turbidity_air_threshold", "value": turb.get("air_threshold", 0), "input": "number"},
         {"label": "raw0 (0 NTU)", "name": "turbidity_raw0", "value": "" if turb.get("raw0") is None else turb.get("raw0"), "input": "number"},
         {"label": "raw_max (%上限)", "name": "turbidity_raw_max", "value": "" if turb.get("raw_max") is None else turb.get("raw_max"), "input": "number"},
@@ -53,20 +101,24 @@ def build_sensor_fields(cfg):
             "options": [("1", "是（高=清）"), ("0", "否（高=濁）")],
         },
         {"type": "section", "label": "MQ135 / MQ137"},
-        {"label": "MQ135 腳位", "name": "mq_pin_135", "value": mq.get("pin_135", 0), "input": "number"},
-        {"label": "MQ137 腳位", "name": "mq_pin_137", "value": mq.get("pin_137", 0), "input": "number"},
+        {"label": "MQ135 腳位", "name": "mq_pin_135", "value": mq.get("pin_135", 0), "input": "number", "disabled": mcp_enabled},
+        {"label": "MQ135 CH", "name": "mq_ch_135", "value": mq.get("ch_135", 0), "input": "number", "disabled": not mcp_enabled},
+        {"label": "MQ137 腳位", "name": "mq_pin_137", "value": mq.get("pin_137", 0), "input": "number", "disabled": mcp_enabled},
+        {"label": "MQ137 CH", "name": "mq_ch_137", "value": mq.get("ch_137", 0), "input": "number", "disabled": not mcp_enabled},
         {"type": "section", "label": "DS18B20"},
         {"label": "淺層腳位", "name": "ds18b20_pin_shallow", "value": ds.get("pin_shallow", 0), "input": "number"},
         {"label": "深層腳位", "name": "ds18b20_pin_deep", "value": ds.get("pin_deep", 0), "input": "number"},
         {"label": "淺層偏移量", "name": "ds18b20_shallow_offset", "value": ds.get("shallow_offset", 0.0), "input": "number", "step": "0.001"},
         {"label": "淺層比例係數", "name": "ds18b20_shallow_scale", "value": ds.get("shallow_scale", 1.0), "input": "number", "step": "0.001"},
         {"type": "section", "label": "TDS"},
-        {"label": "TDS 腳位", "name": "tds_pin", "value": tds.get("pin", 0), "input": "number"},
+        {"label": "TDS 腳位", "name": "tds_pin", "value": tds.get("pin", 0), "input": "number", "disabled": mcp_enabled},
+        {"label": "TDS CH", "name": "tds_ch", "value": tds.get("ch", 0), "input": "number", "disabled": not mcp_enabled},
         {"label": "TDS 參考電壓", "name": "tds_vref", "value": tds.get("vref", 3.3), "input": "number", "step": "0.01"},
         {"label": "溫度補償係數", "name": "tds_temp_compensation_factor", "value": tds.get("temp_compensation_factor", 0.5), "input": "number", "step": "0.01"},
         {"label": "TDS K 係數", "name": "tds_k_factor", "value": tds.get("k_factor", 0.5), "input": "number", "step": "0.01"},
         {"type": "section", "label": "EC"},
-        {"label": "EC 腳位", "name": "ec_pin", "value": ec.get("pin", 0), "input": "number"},
+        {"label": "EC 腳位", "name": "ec_pin", "value": ec.get("pin", 0), "input": "number", "disabled": mcp_enabled},
+        {"label": "EC CH", "name": "ec_ch", "value": ec.get("ch", 0), "input": "number", "disabled": not mcp_enabled},
         {"label": "校正電壓點1", "name": "ec_cal_v1", "value": "" if ec.get("cal_v1") is None else ec.get("cal_v1"), "input": "number", "step": "0.001"},
         {"label": "校正電導點1 (uS/cm)", "name": "ec_cal_us1", "value": "" if ec.get("cal_us1") is None else ec.get("cal_us1"), "input": "number", "step": "0.1"},
         {"label": "校正電壓點2", "name": "ec_cal_v2", "value": "" if ec.get("cal_v2") is None else ec.get("cal_v2"), "input": "number", "step": "0.001"},
@@ -75,7 +127,8 @@ def build_sensor_fields(cfg):
         {"label": "分壓電阻下 (Ohm)", "name": "ec_divider_r_bot", "value": ec.get("divider", {}).get("r_bot", 0), "input": "number"},
         {"label": "EC 除錯輸出", "name": "ec_debug", "value": "1" if ec.get("debug", False) else "0", "input": "select", "options": [("1", "啟用"), ("0", "停用")]},
         {"type": "section", "label": "ORP"},
-        {"label": "ORP 腳位", "name": "orp_pin", "value": orp.get("pin", 0), "input": "number"},
+        {"label": "ORP 腳位", "name": "orp_pin", "value": orp.get("pin", 0), "input": "number", "disabled": mcp_enabled},
+        {"label": "ORP CH", "name": "orp_ch", "value": orp.get("ch", 0), "input": "number", "disabled": not mcp_enabled},
         {"label": "ORP 縮放係數", "name": "orp_scale", "value": orp.get("scale", 1.0), "input": "number", "step": "0.01"},
         {"label": "ORP 偏移量 (mV)", "name": "orp_offset_mv", "value": orp.get("offset_mv", 0.0), "input": "number", "step": "0.1"},
         {"label": "分壓電阻上 (Ohm)", "name": "orp_divider_r_top", "value": orp.get("divider", {}).get("r_top", 0), "input": "number"},
@@ -139,15 +192,35 @@ def build_sensor_fields(cfg):
 # 套用感測器表單資料
 def apply_sensor_form(cfg, form):
     adc = cfg.get("adc", {})
+    mcp_cfg = cfg.get("mcp3208", {})
     ph = cfg.get("ph", {})
     turb = cfg.get("turbidity", {})
     mq = cfg.get("mq", {})
     ds = cfg.get("ds18b20", {})
     tds = cfg.get("tds", {})
+    ec_cfg = cfg.get("ec", {})
     orp_cfg = cfg.get("orp", {})
 
     adc["vref"] = _to_float(form.get("adc_vref"), adc.get("vref", 3.3))
-    ph["pin"] = _to_int(form.get("ph_pin"), ph.get("pin", 0))
+    mcp_cfg["enabled"] = _to_bool(
+        form.get("mcp3208_enabled"), mcp_cfg.get("enabled", False)
+    )
+    mcp_cfg["spi_id"] = _to_int(
+        form.get("mcp3208_spi_id"), mcp_cfg.get("spi_id", 2)
+    )
+    mcp_cfg["baudrate"] = _to_int(
+        form.get("mcp3208_baudrate"), mcp_cfg.get("baudrate", 1000000)
+    )
+    mcp_cfg["sck"] = _to_int(form.get("mcp3208_sck"), mcp_cfg.get("sck", 12))
+    mcp_cfg["mosi"] = _to_int(form.get("mcp3208_mosi"), mcp_cfg.get("mosi", 11))
+    mcp_cfg["miso"] = _to_int(form.get("mcp3208_miso"), mcp_cfg.get("miso", 13))
+    mcp_cfg["cs"] = _to_int(form.get("mcp3208_cs"), mcp_cfg.get("cs", 14))
+    mcp_enabled = bool(mcp_cfg.get("enabled", False))
+
+    if mcp_enabled:
+        ph["ch"] = _to_int(form.get("ph_ch"), ph.get("ch", 0))
+    else:
+        ph["pin"] = _to_int(form.get("ph_pin"), ph.get("pin", 0))
     ph["min"] = _to_float(form.get("ph_min"), ph.get("min", 0.0))
     ph["max"] = _to_float(form.get("ph_max"), ph.get("max", 14.0))
     ph["smoothing_window"] = _to_int(
@@ -181,7 +254,10 @@ def apply_sensor_form(cfg, form):
         ph.get("debug", False),
     )
 
-    turb["pin"] = _to_int(form.get("turbidity_pin"), turb.get("pin", 0))
+    if mcp_enabled:
+        turb["ch"] = _to_int(form.get("turbidity_ch"), turb.get("ch", 0))
+    else:
+        turb["pin"] = _to_int(form.get("turbidity_pin"), turb.get("pin", 0))
     turb["air_threshold"] = _to_int(
         form.get("turbidity_air_threshold"), turb.get("air_threshold", 0)
     )
@@ -198,8 +274,12 @@ def apply_sensor_form(cfg, form):
         turb.get("percent_clear_high", True),
     )
 
-    mq["pin_135"] = _to_int(form.get("mq_pin_135"), mq.get("pin_135", 0))
-    mq["pin_137"] = _to_int(form.get("mq_pin_137"), mq.get("pin_137", 0))
+    if mcp_enabled:
+        mq["ch_135"] = _to_int(form.get("mq_ch_135"), mq.get("ch_135", 0))
+        mq["ch_137"] = _to_int(form.get("mq_ch_137"), mq.get("ch_137", 0))
+    else:
+        mq["pin_135"] = _to_int(form.get("mq_pin_135"), mq.get("pin_135", 0))
+        mq["pin_137"] = _to_int(form.get("mq_pin_137"), mq.get("pin_137", 0))
 
     ds["pin_shallow"] = _to_int(
         form.get("ds18b20_pin_shallow"), ds.get("pin_shallow", 0)
@@ -214,7 +294,10 @@ def apply_sensor_form(cfg, form):
         form.get("ds18b20_shallow_scale"), ds.get("shallow_scale", 1.0)
     )
 
-    tds["pin"] = _to_int(form.get("tds_pin"), tds.get("pin", 0))
+    if mcp_enabled:
+        tds["ch"] = _to_int(form.get("tds_ch"), tds.get("ch", 0))
+    else:
+        tds["pin"] = _to_int(form.get("tds_pin"), tds.get("pin", 0))
     tds["vref"] = _to_float(form.get("tds_vref"), tds.get("vref", 3.3))
     tds["temp_compensation_factor"] = _to_float(
         form.get("tds_temp_compensation_factor"),
@@ -223,8 +306,11 @@ def apply_sensor_form(cfg, form):
     tds["k_factor"] = _to_float(
         form.get("tds_k_factor"), tds.get("k_factor", 0.5)
     )
-    ec_cfg = cfg.get("ec", {})
-    ec_cfg["pin"] = _to_int(form.get("ec_pin"), ec_cfg.get("pin", 0))
+
+    if mcp_enabled:
+        ec_cfg["ch"] = _to_int(form.get("ec_ch"), ec_cfg.get("ch", 0))
+    else:
+        ec_cfg["pin"] = _to_int(form.get("ec_pin"), ec_cfg.get("pin", 0))
     ec_cfg["cal_v1"] = _to_float(form.get("ec_cal_v1"), ec_cfg.get("cal_v1"))
     ec_cfg["cal_us1"] = _to_float(form.get("ec_cal_us1"), ec_cfg.get("cal_us1"))
     ec_cfg["cal_v2"] = _to_float(form.get("ec_cal_v2"), ec_cfg.get("cal_v2"))
@@ -239,7 +325,10 @@ def apply_sensor_form(cfg, form):
     ec_cfg["divider"] = ec_div
     ec_cfg["debug"] = _to_bool(form.get("ec_debug"), ec_cfg.get("debug", False))
 
-    orp_cfg["pin"] = _to_int(form.get("orp_pin"), orp_cfg.get("pin", 0))
+    if mcp_enabled:
+        orp_cfg["ch"] = _to_int(form.get("orp_ch"), orp_cfg.get("ch", 0))
+    else:
+        orp_cfg["pin"] = _to_int(form.get("orp_pin"), orp_cfg.get("pin", 0))
     orp_cfg["scale"] = _to_float(form.get("orp_scale"), orp_cfg.get("scale", 1.0))
     orp_cfg["offset_mv"] = _to_float(
         form.get("orp_offset_mv"), orp_cfg.get("offset_mv", 0.0)
@@ -261,6 +350,7 @@ def apply_sensor_form(cfg, form):
     orp_cfg["debug"] = _to_bool(form.get("orp_debug"), orp_cfg.get("debug", False))
 
     cfg["adc"] = adc
+    cfg["mcp3208"] = mcp_cfg
     cfg["ph"] = ph
     cfg["turbidity"] = turb
     cfg["mq"] = mq
@@ -269,6 +359,4 @@ def apply_sensor_form(cfg, form):
     cfg["ec"] = ec_cfg
     cfg["orp"] = orp_cfg
     return True, "感測器設定已儲存"
-
-
 # 建立系統表單欄位

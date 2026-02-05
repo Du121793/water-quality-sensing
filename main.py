@@ -9,6 +9,7 @@ from methods.sampling import agg_add, agg_avg, should_sample
 from methods.time_sync import sync_time
 from methods.utils import get_date_iso, safe_print, log_mem
 from methods.wifi import connect_wifi, has_wifi_credentials, start_ap
+from methods.mcp3208 import MCP3208, MCP3208ADC
 from sensors.ds18b20 import (
     calculate_temp_calibration,
     check_temp_calibration,
@@ -45,12 +46,48 @@ def main():
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
 
-    adc_ph = init_ph(cfg["ph"]["pin"])
-    adc_turb = init_turbidity(cfg["turbidity"]["pin"])
-    adc135, adc137 = init_mq(cfg["mq"]["pin_135"], cfg["mq"]["pin_137"])
-    adc_tds = init_tds(cfg["tds"]["pin"])
-    adc_ec = init_ec(cfg.get("ec", {}).get("pin", 0))
-    adc_orp = init_orp(cfg.get("orp", {}).get("pin", 0))
+    mcp_cfg = cfg.get("mcp3208", {})
+    mcp_enabled = bool(mcp_cfg.get("enabled", False))
+
+    if mcp_enabled:
+        spi_id = int(mcp_cfg.get("spi_id", 2))
+        baudrate = int(mcp_cfg.get("baudrate", 1000000))
+        sck_pin = int(mcp_cfg.get("sck", 12))
+        mosi_pin = int(mcp_cfg.get("mosi", 11))
+        miso_pin = int(mcp_cfg.get("miso", 13))
+        cs_pin = int(mcp_cfg.get("cs", 14))
+        spi = machine.SPI(
+            spi_id,
+            baudrate=baudrate,
+            polarity=0,
+            phase=0,
+            sck=machine.Pin(sck_pin),
+            mosi=machine.Pin(mosi_pin),
+            miso=machine.Pin(miso_pin),
+        )
+        mcp = MCP3208(spi, machine.Pin(cs_pin, machine.Pin.OUT, value=1))
+
+        ph_cfg = cfg.get("ph", {})
+        turb_cfg = cfg.get("turbidity", {})
+        mq_cfg = cfg.get("mq", {})
+        tds_cfg = cfg.get("tds", {})
+        ec_cfg = cfg.get("ec", {})
+        orp_cfg = cfg.get("orp", {})
+
+        adc_ph = MCP3208ADC(mcp, ph_cfg.get("ch", 0))
+        adc_turb = MCP3208ADC(mcp, turb_cfg.get("ch", 1))
+        adc135 = MCP3208ADC(mcp, mq_cfg.get("ch_135", 2))
+        adc137 = MCP3208ADC(mcp, mq_cfg.get("ch_137", 3))
+        adc_tds = MCP3208ADC(mcp, tds_cfg.get("ch", 4))
+        adc_ec = MCP3208ADC(mcp, ec_cfg.get("ch", 5))
+        adc_orp = MCP3208ADC(mcp, orp_cfg.get("ch", 6))
+    else:
+        adc_ph = init_ph(cfg["ph"]["pin"])
+        adc_turb = init_turbidity(cfg["turbidity"]["pin"])
+        adc135, adc137 = init_mq(cfg["mq"]["pin_135"], cfg["mq"]["pin_137"])
+        adc_tds = init_tds(cfg["tds"]["pin"])
+        adc_ec = init_ec(cfg.get("ec", {}).get("pin", 0))
+        adc_orp = init_orp(cfg.get("orp", {}).get("pin", 0))
     ds_s, roms_s = init_ds18b20(cfg["ds18b20"]["pin_shallow"])
     ds_d, roms_d = init_ds18b20(cfg["ds18b20"]["pin_deep"])
 
