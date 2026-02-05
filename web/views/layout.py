@@ -70,6 +70,11 @@ def _render_layout(base_path, title, content, active, message, show_nav=True, re
       width: 200px;
       padding: 16px 12px;
       background: var(--nav);
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      align-self: flex-start;
     }}
     .nav-item {{
       display: block;
@@ -193,7 +198,15 @@ def _render_layout(base_path, title, content, active, message, show_nav=True, re
     }}
     @media (max-width: 768px) {{
       .shell {{ flex-direction: column; }}
-      .nav {{ width: 100%; display: flex; flex-wrap: wrap; gap: 6px; }}
+      .nav {{
+        width: 100%;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        position: static;
+        height: auto;
+        overflow: visible;
+      }}
       .nav-item {{ flex: 1 1 auto; text-align: center; }}
     }}
   </style>
