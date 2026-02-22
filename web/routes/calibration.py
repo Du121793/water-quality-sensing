@@ -1,7 +1,9 @@
 from methods.utils import get_date_iso
+from methods.api import build_api_url, clone_json
 from sensors.tds import calculate_tds_k
 from ..forms import parse_form
 from ..views import render_calibration_page, render_calibration_step
+import urequests
 try:
     import ujson as json
 except Exception:
@@ -11,10 +13,10 @@ except Exception:
 # 校正步驟順序
 _STEPS = [
     "intro",
+    "temp_match",
     "ph7",
     "ph4",
     "ph10",
-    "temp_match",
     "turb_raw0",
     "turb_raw_max",
     "turb_raw1",
@@ -65,6 +67,88 @@ def _read_detail(status, key, default=None):
     return detail.get(key, default)
 
 
+def _pick_fields(src, keys):
+    out = {}
+    for key in keys:
+        if key in src:
+            out[key] = src.get(key)
+    return out
+
+
+def _calibration_config_snapshot(cfg):
+    return {
+        "ph": _pick_fields(
+            cfg.get("ph", {}),
+            ["calibration_voltages", "use_code_calibration", "last_calibration_iso"],
+        ),
+        "turbidity": _pick_fields(
+            cfg.get("turbidity", {}),
+            ["raw0", "raw_max", "raw1", "ntu1", "last_calibration_iso"],
+        ),
+        "tds": _pick_fields(
+            cfg.get("tds", {}),
+            ["k_factor", "cal_ppm", "cal_v", "cal_temp", "last_calibration_iso"],
+        ),
+        "ec": _pick_fields(
+            cfg.get("ec", {}),
+            ["cal_v1", "cal_us1", "cal_v2", "cal_us2", "last_calibration_iso"],
+        ),
+        "orp": _pick_fields(
+            cfg.get("orp", {}),
+            ["offset_mv", "cal_target_mv", "cal_v_sensor", "cal_raw", "last_calibration_iso"],
+        ),
+        "ds18b20": _pick_fields(
+            cfg.get("ds18b20", {}),
+            ["shallow_offset", "shallow_scale", "last_calibration_iso"],
+        ),
+    }
+
+
+def _calibration_snapshot(cfg, status):
+    return {
+        "config": clone_json(_calibration_config_snapshot(cfg), {}),
+        "reading": clone_json(status.get("last_reading_detail", {}), {}),
+    }
+
+
+def _send_maintenance_record(server, cfg, status):
+    api_cfg = cfg.get("api", {})
+    if not api_cfg:
+        return
+
+    before = status.pop("calibration_before", None)
+    before_iso = status.pop("calibration_before_iso", None)
+    after = _calibration_snapshot(cfg, status)
+    calibration_time = get_date_iso(cfg.get("time", {}).get("timezone_offset_s", 0))
+    payload = {
+        "sensorId": cfg.get("payload", {}).get("sensor_id"),
+        "date": calibration_time,
+        "local_ip": status.get("ip") or "",
+        "calibration_time": calibration_time,
+        "before": before or {},
+        "after": after,
+    }
+    if before_iso:
+        payload["calibration_start"] = before_iso
+
+    url = build_api_url(cfg, "maintain_record", "/maintainRecord")
+    headers = api_cfg.get("headers", {})
+    timeout = api_cfg.get("post_timeout_s", 10)
+    try:
+        try:
+            r = urequests.post(url, json=payload, headers=headers, timeout=timeout)
+        except TypeError:
+            r = urequests.post(url, json=payload, headers=headers)
+        status_code = r.status_code
+        r.close()
+        if status_code == 200:
+            server._log("Maintenance record sent")
+        else:
+            server._log("Maintenance record HTTP {}".format(status_code))
+    except Exception as e:
+        server._log("Maintenance record send failed: {}".format(e))
+
+
 # 處理校正流程
 def handle_calibration(server, method, body):
     query = getattr(server, "_query", "") or ""
@@ -79,10 +163,17 @@ def handle_calibration(server, method, body):
             web_cfg = cfg.get("web", {})
             web_cfg["mode"] = "calibration" if action == "set_mode_calibration" else "normal"
             cfg["web"] = web_cfg
+            if action == "set_mode_calibration":
+                status = server._status
+                status["calibration_before"] = _calibration_snapshot(cfg, status)
+                status["calibration_before_iso"] = get_date_iso(
+                    cfg.get("time", {}).get("timezone_offset_s", 0)
+                )
             _save(cfg, server._save_config)
             if action == "set_mode_calibration":
                 server._redirect(server._client, server._base_path + "/calibration?step=intro")
             else:
+                _send_maintenance_record(server, cfg, server._status)
                 server._redirect(server._client, server._base_path + "/")
             return True
 
@@ -326,9 +417,15 @@ def handle_calibration(server, method, body):
 
     if step == "ph7":
         ph_v = _read_detail(status, "ph_v", "NA")
-        value_html = '<span data-live-key="ph_v" data-live-unit=" V">{}</span>'.format(
-            ph_v
-        )
+        ph_val = _read_detail(status, "ph", "NA")
+        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
+        value_html = (
+            '電壓 <span data-live-key="ph_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 <span data-live-key="ph">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+        ).format(ph_v, ph_val, temp_c)
         html = render_calibration_step(
             server._base_path,
             "pH 7 校正",
@@ -342,9 +439,15 @@ def handle_calibration(server, method, body):
         )
     elif step == "ph4":
         ph_v = _read_detail(status, "ph_v", "NA")
-        value_html = '<span data-live-key="ph_v" data-live-unit=" V">{}</span>'.format(
-            ph_v
-        )
+        ph_val = _read_detail(status, "ph", "NA")
+        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
+        value_html = (
+            '電壓 <span data-live-key="ph_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 <span data-live-key="ph">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+        ).format(ph_v, ph_val, temp_c)
         html = render_calibration_step(
             server._base_path,
             "pH 4 校正",
@@ -358,9 +461,15 @@ def handle_calibration(server, method, body):
         )
     elif step == "ph10":
         ph_v = _read_detail(status, "ph_v", "NA")
-        value_html = '<span data-live-key="ph_v" data-live-unit=" V">{}</span>'.format(
-            ph_v
-        )
+        ph_val = _read_detail(status, "ph", "NA")
+        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
+        value_html = (
+            '電壓 <span data-live-key="ph_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 <span data-live-key="ph">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+        ).format(ph_v, ph_val, temp_c)
         html = render_calibration_step(
             server._base_path,
             "pH 10 校正",
@@ -376,9 +485,10 @@ def handle_calibration(server, method, body):
         temp_shallow = _read_detail(status, "temp_shallow", "NA")
         temp_deep = _read_detail(status, "temp_deep", "NA")
         value_html = (
-            '<span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
+            "電壓 NA / "
+            '檢測值(淺層) <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
             " / "
-            '<span data-live-key="temp_deep" data-live-unit=" C">{}</span>'
+            '溫度(深層) <span data-live-key="temp_deep" data-live-unit=" C">{}</span>'
         ).format(temp_shallow, temp_deep)
         html = render_calibration_step(
             server._base_path,
@@ -393,9 +503,18 @@ def handle_calibration(server, method, body):
         )
     elif step == "turb_raw0":
         turb_raw = _read_detail(status, "turbidity_raw", "NA")
-        value_html = 'raw <span data-live-key="turbidity_raw">{}</span>'.format(
-            turb_raw
-        )
+        turb_v = _read_detail(status, "turbidity_v", "NA")
+        turb_ntu = _read_detail(status, "turbidity_ntu", "NA")
+        temp_c = _read_detail(status, "temp_shallow", "NA")
+        value_html = (
+            '電壓 <span data-live-key="turbidity_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 raw <span data-live-key="turbidity_raw">{}</span>'
+            " / "
+            'NTU <span data-live-key="turbidity_ntu">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
+        ).format(turb_v, turb_raw, turb_ntu, temp_c)
         html = render_calibration_step(
             server._base_path,
             "濁度 0 NTU 校正",
@@ -409,9 +528,18 @@ def handle_calibration(server, method, body):
         )
     elif step == "turb_raw_max":
         turb_raw = _read_detail(status, "turbidity_raw", "NA")
-        value_html = 'raw <span data-live-key="turbidity_raw">{}</span>'.format(
-            turb_raw
-        )
+        turb_v = _read_detail(status, "turbidity_v", "NA")
+        turb_ntu = _read_detail(status, "turbidity_ntu", "NA")
+        temp_c = _read_detail(status, "temp_shallow", "NA")
+        value_html = (
+            '電壓 <span data-live-key="turbidity_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 raw <span data-live-key="turbidity_raw">{}</span>'
+            " / "
+            'NTU <span data-live-key="turbidity_ntu">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
+        ).format(turb_v, turb_raw, turb_ntu, temp_c)
         html = render_calibration_step(
             server._base_path,
             "濁度 相對上限校正",
@@ -425,13 +553,22 @@ def handle_calibration(server, method, body):
         )
     elif step == "turb_raw1":
         turb_raw = _read_detail(status, "turbidity_raw", "NA")
-        value_html = 'raw <span data-live-key="turbidity_raw">{}</span>'.format(
-            turb_raw
-        )
+        turb_v = _read_detail(status, "turbidity_v", "NA")
+        turb_ntu = _read_detail(status, "turbidity_ntu", "NA")
+        temp_c = _read_detail(status, "temp_shallow", "NA")
+        value_html = (
+            '電壓 <span data-live-key="turbidity_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 raw <span data-live-key="turbidity_raw">{}</span>'
+            " / "
+            'NTU <span data-live-key="turbidity_ntu">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
+        ).format(turb_v, turb_raw, turb_ntu, temp_c)
         html = render_calibration_step(
             server._base_path,
             "濁度 NTU 校正",
-            "請將探頭放入已知 NTU 溶液，輸入 NTU 後按確認",
+            "請將探頭放入已知 NTU 溶液，輸入 NTU 後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
             "",
             server._base_path + "/calibration?step=turb_raw1",
             [{"label": "NTU 值", "name": "ntu1", "value": "", "input": "number", "step": "0.1"}],
@@ -440,16 +577,20 @@ def handle_calibration(server, method, body):
             value_html=value_html,
         )
     elif step == "tds_point":
-        tds_raw = _read_detail(status, "tds_raw", "NA")
         tds_v = _read_detail(status, "tds_v", "NA")
+        tds_ppm = _read_detail(status, "tds_ppm", "NA")
+        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
         value_html = (
-            'raw <span data-live-key="tds_raw">{}</span> / V '
-            '<span data-live-key="tds_v">{}</span>'
-        ).format(tds_raw, tds_v)
+            '電壓 <span data-live-key="tds_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 <span data-live-key="tds_ppm" data-live-unit=" ppm">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+        ).format(tds_v, tds_ppm, temp_c)
         html = render_calibration_step(
             server._base_path,
             "TDS 校正",
-            "請將探頭放入 TDS 標準液，輸入 ppm 後按確認",
+            "請將探頭放入 TDS 標準液，輸入 ppm 後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
             "",
             server._base_path + "/calibration?step=tds_point",
             [{"label": "ppm", "name": "ppm", "value": "1413", "input": "number", "step": "0.1"}],
@@ -459,13 +600,19 @@ def handle_calibration(server, method, body):
         )
     elif step == "ec_point1":
         ec_v = _read_detail(status, "ec_v", "NA")
-        value_html = '<span data-live-key="ec_v" data-live-unit=" V">{}</span>'.format(
-            ec_v
-        )
+        ec_us = _read_detail(status, "ec_us", "NA")
+        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
+        value_html = (
+            '電壓 <span data-live-key="ec_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 <span data-live-key="ec_us" data-live-unit=" uS/cm">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+        ).format(ec_v, ec_us, temp_c)
         html = render_calibration_step(
             server._base_path,
             "EC 校正點 1",
-            "請將探頭放入標準液，輸入數值並選擇單位後按確認",
+            "請將探頭放入標準液，輸入數值並選擇單位後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
             "",
             server._base_path + "/calibration?step=ec_point1",
             [
@@ -484,13 +631,19 @@ def handle_calibration(server, method, body):
         )
     elif step == "ec_point2":
         ec_v = _read_detail(status, "ec_v", "NA")
-        value_html = '<span data-live-key="ec_v" data-live-unit=" V">{}</span>'.format(
-            ec_v
-        )
+        ec_us = _read_detail(status, "ec_us", "NA")
+        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
+        value_html = (
+            '電壓 <span data-live-key="ec_v" data-live-unit=" V">{}</span>'
+            " / "
+            '檢測值 <span data-live-key="ec_us" data-live-unit=" uS/cm">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+        ).format(ec_v, ec_us, temp_c)
         html = render_calibration_step(
             server._base_path,
             "EC 校正點 2",
-            "請將探頭放入第二標準液，輸入數值並選擇單位後按確認",
+            "請將探頭放入第二標準液，輸入數值並選擇單位後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
             "",
             server._base_path + "/calibration?step=ec_point2",
             [
@@ -510,15 +663,18 @@ def handle_calibration(server, method, body):
     elif step == "orp_point":
         orp_v = _read_detail(status, "orp_v_sensor", "NA")
         orp_mv = _read_detail(status, "orp_mv", "NA")
+        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
         value_html = (
-            '<span data-live-key="orp_v_sensor" data-live-unit=" V">{}</span>'
+            '電壓 <span data-live-key="orp_v_sensor" data-live-unit=" V">{}</span>'
             " / "
-            '<span data-live-key="orp_mv" data-live-unit=" mV">{}</span>'
-        ).format(orp_v, orp_mv)
+            '檢測值 <span data-live-key="orp_mv" data-live-unit=" mV">{}</span>'
+            " / "
+            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+        ).format(orp_v, orp_mv, temp_c)
         html = render_calibration_step(
             server._base_path,
             "ORP 校正",
-            "請將探頭放入 ORP 標準液，輸入目標 mV 後按確認",
+            "請將探頭放入 ORP 標準液，輸入目標 mV 後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
             "",
             server._base_path + "/calibration?step=orp_point",
             [
