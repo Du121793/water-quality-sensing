@@ -4,6 +4,14 @@ import network
 import urequests
 
 from methods.config import load_config, save_config
+from methods.api import build_api_url
+from methods.async_sender import (
+    async_supported,
+    drain_async_results,
+    enqueue_async,
+    init_async_sender,
+    post_with_retry,
+)
 from methods.logger import Logger
 from methods.sampling import agg_add, agg_avg, should_sample
 from methods.time_sync import sync_time
@@ -135,6 +143,17 @@ def main():
         if mem_trace:
             log_mem(tag, log_fn=logger.log, force_gc=mem_trace_force_gc)
 
+    async_state = None
+    api_cfg = cfg.get("api", {})
+    async_enabled = bool(api_cfg.get("async_enabled", False))
+    if async_enabled and async_supported():
+        async_state = init_async_sender(api_cfg, _mem)
+        safe_print("Async sender enabled")
+        logger.log("Async sender enabled")
+    elif async_enabled and not async_supported():
+        safe_print("Async sender requires _thread, but it is not available")
+        logger.log("Async sender requires _thread, but it is not available")
+
     safe_print("Initializing WiFi connection...")
     wifi_mode = connect_wifi(cfg, log_fn=logger.log)
     status["wifi_mode"] = wifi_mode
@@ -156,6 +175,29 @@ def main():
         _mem("loop_start")
         if admin_server:
             admin_server.poll()
+
+        if async_state:
+            results = drain_async_results(async_state)
+            if results:
+                for result in results:
+                    status_code = result.get("status_code")
+                    if status_code is not None:
+                        status["last_http_code"] = status_code
+                    if result.get("ok"):
+                        status["last_send_iso"] = result.get("date_iso") or status.get(
+                            "last_send_iso"
+                        )
+                        status["last_error"] = ""
+                        global_failures = 0
+                        last_successful_transmission = time.ticks_ms()
+                        logger.log("HTTP 200 sent")
+                    else:
+                        last_error = result.get("error") or ""
+                        status["last_error"] = last_error
+                        if status_code is not None:
+                            logger.log("HTTP error {}".format(status_code))
+                        elif last_error:
+                            logger.log("POST error: {}".format(last_error))
 
         mode_cfg = get_mode_settings(cfg)
         web_mode = mode_cfg["mode"]
@@ -322,13 +364,16 @@ def main():
                 "MQ137(raw)": mq["raw137"],
             }
             status["last_reading_detail"] = {
+                "ph": ph,
                 "ph_raw": ph_raw,
                 "ph_v": ph_v,
                 "turbidity_raw": turb_raw,
                 "turbidity_percent": turb_percent,
                 "turbidity_ntu": turb_ntu,
+                "turbidity_v": turb.get("v"),
                 "tds_raw": tds_raw,
                 "tds_v": tds_v,
+                "tds_ppm": tds_ppm,
                 "temp_for_ph_tds": temp_for_ph_tds,
                 "temp_shallow": t_shallow,
                 "temp_deep": t_deep,
@@ -445,94 +490,48 @@ def main():
 
         safe_print("SEND:", payload)
 
-        success = False
-        retry_count = 0
-        max_retries = int(cfg["api"].get("max_retries", 6))
-        max_retry_interval = int(cfg["api"].get("max_retry_interval_s", 3))
-        ssl_retry_max = int(cfg["api"].get("ssl_retry_max_s", 6))
-        last_error = ""
+        api_cfg = cfg.get("api", {})
+        task = {
+            "api_url": build_api_url(cfg, "include", "/include"),
+            "payload": payload,
+            "headers": api_cfg.get("headers", {}),
+            "timeout_s": api_cfg.get("post_timeout_s", 30),
+            "max_retries": int(api_cfg.get("max_retries", 6)),
+            "max_retry_interval_s": int(api_cfg.get("max_retry_interval_s", 3)),
+            "ssl_retry_max_s": int(api_cfg.get("ssl_retry_max_s", 6)),
+            "start_ms": last_transmission,
+            "data_interval_ms": int(cfg["intervals"]["data_interval_s"] * 1000),
+            "date_iso": date_iso,
+        }
 
-        while not success and retry_count < max_retries:
-            if admin_server:
-                admin_server.poll()
-            try:
-                _mem("http_post_start")
-                try:
-                    r = urequests.post(
-                        cfg["api"]["url"],
-                        json=payload,
-                        headers=cfg["api"]["headers"],
-                        timeout=cfg["api"]["post_timeout_s"],
-                    )
-                except TypeError:
-                    r = urequests.post(
-                        cfg["api"]["url"],
-                        json=payload,
-                        headers=cfg["api"]["headers"],
-                    )
-                status_code = r.status_code
-                safe_print("HTTP code:", status_code)
-                r.close()
-                status["last_http_code"] = status_code
-                _mem("http_post_end")
+        if async_state:
+            enqueued = enqueue_async(async_state, task)
+            if not enqueued:
+                status["last_error"] = "async_queue_full"
+                safe_print("Async queue is full, skipping this send")
+                logger.log("Async queue is full, skipping send")
+            agg = {}
+            continue
 
-                if status_code == 200:
-                    safe_print("Data sent successfully!")
-                    success = True
-                    global_failures = 0
-                    last_successful_transmission = time.ticks_ms()
-                    status["last_send_iso"] = date_iso
-                    status["last_error"] = ""
-                    logger.log("HTTP 200 sent")
-                else:
-                    retry_count += 1
-                    last_error = "HTTP {}".format(status_code)
-                    safe_print("HTTP error {}, retrying...".format(status_code))
-                    status["last_error"] = last_error
-                    logger.log("HTTP error {}".format(status_code))
-
-            except Exception as e:
-                retry_count += 1
-                last_error = str(e)
-                safe_print("POST error (attempt {}): {}".format(retry_count, last_error))
-                status["last_error"] = last_error
+        result = post_with_retry(
+            task, poll_fn=admin_server.poll if admin_server else None, mem_fn=_mem
+        )
+        status_code = result.get("status_code")
+        if status_code is not None:
+            status["last_http_code"] = status_code
+        if result.get("ok"):
+            status["last_send_iso"] = date_iso
+            status["last_error"] = ""
+            global_failures = 0
+            last_successful_transmission = time.ticks_ms()
+            logger.log("HTTP 200 sent")
+        else:
+            last_error = result.get("error") or ""
+            status["last_error"] = last_error
+            if status_code is not None:
+                logger.log("HTTP error {}".format(status_code))
+            elif last_error:
                 logger.log("POST error: {}".format(last_error))
-                _mem("http_post_error")
-
-            now = time.ticks_ms()
-            if (
-                time.ticks_diff(now, last_transmission)
-                >= cfg["intervals"]["data_interval_s"] * 1000
-            ):
-                safe_print("Skipping retry - time for next data collection")
-                break
-
-            if not success and retry_count < max_retries:
-                if (
-                    "-202" in last_error
-                    or "SSL" in last_error
-                    or "TLS" in last_error
-                    or "MBEDTLS" in last_error
-                ):
-                    retry_delay = min(retry_count * 2, ssl_retry_max)
-                    safe_print(
-                        "SSL error detected, retrying in {} seconds...".format(
-                            retry_delay
-                        )
-                    )
-                else:
-                    retry_delay = min(retry_count, max_retry_interval)
-                    safe_print("Retrying in {} seconds...".format(retry_delay))
-                time.sleep(retry_delay)
-            elif retry_count >= max_retries:
-                safe_print(
-                    "Max retries ({}) reached, giving up for this cycle".format(
-                        max_retries
-                    )
-                )
-                break
-
-            time.sleep_ms(100)
 
         agg = {}
 
@@ -564,6 +563,32 @@ if __name__ == "__main__":
 
         try:
             cfg = load_config()
+            # Ensure crash details are recorded in log file for crash report.
+            try:
+                log_cfg = cfg.get("log", {})
+                log_file = log_cfg.get("file", "logs.txt")
+                tz_offset = cfg.get("time", {}).get("timezone_offset_s", 0)
+                try:
+                    crash_iso = get_date_iso(tz_offset)
+                except Exception:
+                    crash_iso = "unknown"
+                try:
+                    with open(log_file, "a") as f:
+                        for line in msg_err.splitlines():
+                            f.write("{} CRASH {}\n".format(crash_iso, line))
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            log_text = ""
+            try:
+                logger = Logger(cfg)
+                log_lines = logger.read_tail()
+                log_text = "\n".join(log_lines)
+            except Exception:
+                log_text = ""
+
             wlan = network.WLAN(network.STA_IF)
             if not wlan.isconnected():
                 safe_print("Crash Handler: WiFi disconnected, attempting reconnect...")
@@ -588,15 +613,16 @@ if __name__ == "__main__":
                 }
                 try:
                     try:
+                        api_url = build_api_url(cfg, "include", "/include")
                         r = urequests.post(
-                            cfg["api"]["url"],
+                            api_url,
                             json=error_payload,
                             headers=cfg["api"]["headers"],
                             timeout=5,
                         )
                     except TypeError:
                         r = urequests.post(
-                            cfg["api"]["url"],
+                            api_url,
                             json=error_payload,
                             headers=cfg["api"]["headers"],
                         )
@@ -605,6 +631,35 @@ if __name__ == "__main__":
                 except Exception as post_e:
                     safe_print(
                         "Crash Handler: Failed to send report: {}".format(post_e)
+                    )
+
+                crash_payload = {
+                    "sensorId": cfg["payload"]["sensor_id"],
+                    "date": date_iso,
+                    "local_ip": local_ip,
+                    "msg_err": msg_err,
+                    "log_text": log_text,
+                }
+                try:
+                    try:
+                        crash_url = build_api_url(cfg, "crash_report", "/crashReport")
+                        r = urequests.post(
+                            crash_url,
+                            json=crash_payload,
+                            headers=cfg["api"]["headers"],
+                            timeout=5,
+                        )
+                    except TypeError:
+                        r = urequests.post(
+                            crash_url,
+                            json=crash_payload,
+                            headers=cfg["api"]["headers"],
+                        )
+                    r.close()
+                    safe_print("Crash Handler: Crash log sent.")
+                except Exception as post_e:
+                    safe_print(
+                        "Crash Handler: Failed to send crash log: {}".format(post_e)
                     )
             else:
                 safe_print(

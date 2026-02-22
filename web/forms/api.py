@@ -5,13 +5,38 @@ from .common import _to_int
 # 建立 API 表單欄位
 def build_api_fields(cfg):
     api_cfg = cfg.get("api", {})
+    endpoint = api_cfg.get("endpoint", "")
+    routes = api_cfg.get("routes", {}) or {}
+    if not endpoint:
+        legacy_url = api_cfg.get("url", "")
+        if legacy_url:
+            idx = legacy_url.rfind("/")
+            endpoint = legacy_url[:idx] if idx > 8 else legacy_url
     headers = api_cfg.get("headers", {})
     return [
         {"type": "section", "label": "API 設定"},
         {
-            "label": "API URL",
-            "name": "api_url",
-            "value": api_cfg.get("url", ""),
+            "label": "API 數據發送節點",
+            "name": "api_endpoint",
+            "value": endpoint,
+            "input": "text",
+        },
+        {
+            "label": "感測資料發送路由 (/include)",
+            "name": "api_route_include",
+            "value": routes.get("include", "/include"),
+            "input": "text",
+        },
+        {
+            "label": "維護紀錄發送路由 (/maintainRecord)",
+            "name": "api_route_maintain_record",
+            "value": routes.get("maintain_record", "/maintainRecord"),
+            "input": "text",
+        },
+        {
+            "label": "崩潰紀錄發送路由 (/crashReport)",
+            "name": "api_route_crash_report",
+            "value": routes.get("crash_report", "/crashReport"),
             "input": "text",
         },
         {
@@ -68,7 +93,16 @@ def apply_api_form(cfg, form):
     api_cfg = cfg.get("api", {})
     headers = api_cfg.get("headers", {})
 
-    api_cfg["url"] = form.get("api_url", api_cfg.get("url", ""))
+    api_cfg["endpoint"] = form.get("api_endpoint", api_cfg.get("endpoint", ""))
+    routes = api_cfg.get("routes", {}) or {}
+    routes["include"] = form.get("api_route_include", routes.get("include", "/include"))
+    routes["maintain_record"] = form.get(
+        "api_route_maintain_record", routes.get("maintain_record", "/maintainRecord")
+    )
+    routes["crash_report"] = form.get(
+        "api_route_crash_report", routes.get("crash_report", "/crashReport")
+    )
+    api_cfg["routes"] = routes
     headers["Authorization"] = form.get(
         "api_header_authorization", headers.get("Authorization", "")
     )
