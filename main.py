@@ -15,7 +15,7 @@ from methods.async_sender import (
 from methods.logger import Logger
 from methods.sampling import agg_add, agg_avg, should_sample
 from methods.time_sync import sync_time
-from methods.utils import get_date_iso, safe_print, log_mem
+from methods.utils import get_date_iso, get_date_iso_utc, safe_print, log_mem
 from methods.wifi import connect_wifi, has_wifi_credentials, start_ap
 from methods.mcp3208 import MCP3208, MCP3208ADC
 from sensors.ds18b20 import (
@@ -413,7 +413,8 @@ def main():
             time.sleep_ms(200)
             continue
 
-        date_iso = get_date_iso(cfg["time"]["timezone_offset_s"])
+        date_iso_local = get_date_iso(cfg["time"]["timezone_offset_s"])
+        date_iso_utc = get_date_iso_utc()
         avg_t_shallow = agg_avg(agg, "t_shallow")
         avg_t_deep = agg_avg(agg, "t_deep")
         avg_ph = agg_avg(agg, "ph")
@@ -453,7 +454,7 @@ def main():
         local_ip = status.get("ip") or ""
         payload = {
             "sensorId": cfg["payload"]["sensor_id"],
-            "date": date_iso,
+            "date": date_iso_utc,
             "local_ip": local_ip,
             "ph": ph,
             "turbidity_raw": turb_raw,
@@ -501,7 +502,7 @@ def main():
             "ssl_retry_max_s": int(api_cfg.get("ssl_retry_max_s", 6)),
             "start_ms": last_transmission,
             "data_interval_ms": int(cfg["intervals"]["data_interval_s"] * 1000),
-            "date_iso": date_iso,
+            "date_iso": date_iso_local,
         }
 
         if async_state:
@@ -520,7 +521,7 @@ def main():
         if status_code is not None:
             status["last_http_code"] = status_code
         if result.get("ok"):
-            status["last_send_iso"] = date_iso
+            status["last_send_iso"] = date_iso_local
             status["last_error"] = ""
             global_failures = 0
             last_successful_transmission = time.ticks_ms()
@@ -597,7 +598,7 @@ if __name__ == "__main__":
             if wlan.isconnected():
                 safe_print("Crash Handler: WiFi connected, sending report.")
                 try:
-                    date_iso = get_date_iso(cfg["time"]["timezone_offset_s"])
+                    date_iso = get_date_iso_utc()
                 except Exception:
                     date_iso = "unknown"
                 try:
