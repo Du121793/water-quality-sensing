@@ -5,6 +5,7 @@ from .views import (
     render_log_page,
     render_password_page,
     render_status_page,
+    render_calibration_overview,
     render_calibration_page,
     render_calibration_step,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "render_log_page",
     "render_password_page",
     "render_status_page",
+    "render_calibration_overview",
     "render_calibration_page",
     "render_calibration_step",
 ]

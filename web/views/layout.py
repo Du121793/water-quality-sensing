@@ -97,6 +97,15 @@ def _render_layout(base_path, title, content, active, message, show_nav=True, re
       border-radius: 10px;
       padding: 18px;
     }}
+    .cal-block {{
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      margin-bottom: 12px;
+    }}
+    .cal-block h2 {{ margin-top: 0; }}
+    .cal-block form {{ margin: 0; }}
     h1 {{ margin: 0 0 12px; font-size: 20px; }}
     h2 {{ margin: 16px 0 8px; font-size: 16px; }}
     .muted {{ color: var(--muted); font-size: 12px; }}

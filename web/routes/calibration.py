@@ -1,8 +1,12 @@
-from methods.utils import get_date_iso
+from methods.utils import get_date_iso, get_date_iso_utc
 from methods.api import build_api_url, clone_json
 from sensors.tds import calculate_tds_k
 from ..forms import parse_form
-from ..views import render_calibration_page, render_calibration_step
+from ..views import (
+    render_calibration_overview,
+    render_calibration_page,
+    render_calibration_step,
+)
 import urequests
 try:
     import ujson as json
@@ -119,7 +123,7 @@ def _send_maintenance_record(server, cfg, status):
     before = status.pop("calibration_before", None)
     before_iso = status.pop("calibration_before_iso", None)
     after = _calibration_snapshot(cfg, status)
-    calibration_time = get_date_iso(cfg.get("time", {}).get("timezone_offset_s", 0))
+    calibration_time = get_date_iso_utc()
     payload = {
         "sensorId": cfg.get("payload", {}).get("sensor_id"),
         "date": calibration_time,
@@ -151,9 +155,6 @@ def _send_maintenance_record(server, cfg, status):
 
 # 處理校正流程
 def handle_calibration(server, method, body):
-    query = getattr(server, "_query", "") or ""
-    step = _current_step(query)
-
     if method == "POST":
         form = parse_form(body)
         action = form.get("action", "")
@@ -166,208 +167,268 @@ def handle_calibration(server, method, body):
             if action == "set_mode_calibration":
                 status = server._status
                 status["calibration_before"] = _calibration_snapshot(cfg, status)
-                status["calibration_before_iso"] = get_date_iso(
-                    cfg.get("time", {}).get("timezone_offset_s", 0)
-                )
+                status["calibration_before_iso"] = get_date_iso_utc()
             _save(cfg, server._save_config)
             if action == "set_mode_calibration":
-                server._redirect(server._client, server._base_path + "/calibration?step=intro")
+                server._redirect(server._client, server._base_path + "/calibration")
             else:
                 _send_maintenance_record(server, cfg, server._status)
                 server._redirect(server._client, server._base_path + "/")
             return True
 
-        if action == "skip":
-            server._redirect(
-                server._client,
-                server._base_path + "/calibration?step={}".format(_next_step(step)),
-            )
-            return True
+        status = server._status
+        saved = False
+        msg = ""
 
-        if action == "confirm":
-            cfg = server._cfg
-            status = server._status
+        if action == "save_ph7":
+            ph_v = _read_detail(status, "ph_v", None)
+            if ph_v is not None:
+                ph_cfg = cfg.get("ph", {})
+                cal = ph_cfg.get("calibration_voltages", {})
+                cal["ph7"] = float(ph_v)
+                ph_cfg["calibration_voltages"] = cal
+                cfg["ph"] = ph_cfg
+                _set_last_calibration(cfg, "ph")
+                _save(cfg, server._save_config)
+                saved = True
+                msg = "pH 7 校正已儲存"
+            else:
+                msg = "pH 7 儲存失敗：讀值無效"
 
-            if step == "ph7":
-                ph_v = _read_detail(status, "ph_v", None)
-                if ph_v is not None:
-                    ph_cfg = cfg.get("ph", {})
-                    cal = ph_cfg.get("calibration_voltages", {})
-                    cal["ph7"] = float(ph_v)
-                    ph_cfg["calibration_voltages"] = cal
-                    cfg["ph"] = ph_cfg
-                    _set_last_calibration(cfg, "ph")
+        elif action == "save_ph4":
+            ph_v = _read_detail(status, "ph_v", None)
+            if ph_v is not None:
+                ph_cfg = cfg.get("ph", {})
+                cal = ph_cfg.get("calibration_voltages", {})
+                cal["ph4"] = float(ph_v)
+                ph_cfg["calibration_voltages"] = cal
+                cfg["ph"] = ph_cfg
+                _set_last_calibration(cfg, "ph")
+                _save(cfg, server._save_config)
+                saved = True
+                msg = "pH 4 校正已儲存"
+            else:
+                msg = "pH 4 儲存失敗：讀值無效"
+
+        elif action == "save_ph10":
+            ph_v = _read_detail(status, "ph_v", None)
+            if ph_v is not None:
+                ph_cfg = cfg.get("ph", {})
+                cal = ph_cfg.get("calibration_voltages", {})
+                cal["ph10"] = float(ph_v)
+                ph_cfg["calibration_voltages"] = cal
+                cfg["ph"] = ph_cfg
+                _set_last_calibration(cfg, "ph")
+                _save(cfg, server._save_config)
+                saved = True
+                msg = "pH 10 校正已儲存"
+            else:
+                msg = "pH 10 儲存失敗：讀值無效"
+
+        elif action == "save_temp_match":
+            temp_shallow = _read_detail(status, "temp_shallow", None)
+            temp_deep = _read_detail(status, "temp_deep", None)
+            if isinstance(temp_shallow, (int, float)) and isinstance(
+                temp_deep, (int, float)
+            ):
+                if temp_shallow != -127.0 and temp_deep != -127.0:
+                    offset = float(temp_deep) - float(temp_shallow)
+                    ds_cfg = cfg.get("ds18b20", {})
+                    ds_cfg["shallow_offset"] = round(offset, 3)
+                    ds_cfg["shallow_scale"] = 1.0
+                    cfg["ds18b20"] = ds_cfg
+                    _set_last_calibration(cfg, "ds18b20")
                     _save(cfg, server._save_config)
+                    saved = True
+                    msg = "溫度校正已儲存"
+                else:
+                    msg = "溫度校正失敗：讀值無效"
+            else:
+                msg = "溫度校正失敗：讀值無效"
 
-            elif step == "ph4":
-                ph_v = _read_detail(status, "ph_v", None)
-                if ph_v is not None:
-                    ph_cfg = cfg.get("ph", {})
-                    cal = ph_cfg.get("calibration_voltages", {})
-                    cal["ph4"] = float(ph_v)
-                    ph_cfg["calibration_voltages"] = cal
-                    cfg["ph"] = ph_cfg
-                    _set_last_calibration(cfg, "ph")
-                    _save(cfg, server._save_config)
+        elif action == "save_turb_raw0":
+            turb_raw = _read_detail(status, "turbidity_raw", None)
+            if turb_raw is not None:
+                turb_cfg = cfg.get("turbidity", {})
+                turb_cfg["raw0"] = int(turb_raw)
+                cfg["turbidity"] = turb_cfg
+                _set_last_calibration(cfg, "turbidity")
+                _save(cfg, server._save_config)
+                saved = True
+                msg = "濁度 0 NTU 校正已儲存"
+            else:
+                msg = "濁度 0 NTU 儲存失敗：讀值無效"
 
-            elif step == "ph10":
-                ph_v = _read_detail(status, "ph_v", None)
-                if ph_v is not None:
-                    ph_cfg = cfg.get("ph", {})
-                    cal = ph_cfg.get("calibration_voltages", {})
-                    cal["ph10"] = float(ph_v)
-                    ph_cfg["calibration_voltages"] = cal
-                    cfg["ph"] = ph_cfg
-                    _set_last_calibration(cfg, "ph")
-                    _save(cfg, server._save_config)
+        elif action == "save_turb_raw_max":
+            turb_raw = _read_detail(status, "turbidity_raw", None)
+            if turb_raw is not None:
+                turb_cfg = cfg.get("turbidity", {})
+                turb_cfg["raw_max"] = int(turb_raw)
+                cfg["turbidity"] = turb_cfg
+                _set_last_calibration(cfg, "turbidity")
+                _save(cfg, server._save_config)
+                saved = True
+                msg = "濁度上限校正已儲存"
+            else:
+                msg = "濁度上限儲存失敗：讀值無效"
 
-            elif step == "temp_match":
-                temp_shallow = _read_detail(status, "temp_shallow", None)
-                temp_deep = _read_detail(status, "temp_deep", None)
-                if isinstance(temp_shallow, (int, float)) and isinstance(
-                    temp_deep, (int, float)
-                ):
-                    if temp_shallow != -127.0 and temp_deep != -127.0:
-                        offset = float(temp_deep) - float(temp_shallow)
-                        ds_cfg = cfg.get("ds18b20", {})
-                        ds_cfg["shallow_offset"] = round(offset, 3)
-                        ds_cfg["shallow_scale"] = 1.0
-                        cfg["ds18b20"] = ds_cfg
-                        _set_last_calibration(cfg, "ds18b20")
-                        _save(cfg, server._save_config)
-
-            elif step == "turb_raw0":
-                turb_raw = _read_detail(status, "turbidity_raw", None)
-                if turb_raw is not None:
+        elif action == "save_turb_raw1":
+            turb_raw = _read_detail(status, "turbidity_raw", None)
+            ntu1 = form.get("ntu1", "").strip()
+            if not ntu1:
+                msg = "濁度 NTU 儲存失敗：請輸入 NTU 值"
+            elif turb_raw is None:
+                msg = "濁度 NTU 儲存失敗：讀值無效"
+            else:
+                try:
+                    ntu1_val = float(ntu1)
+                except Exception:
+                    ntu1_val = None
+                if ntu1_val is not None:
                     turb_cfg = cfg.get("turbidity", {})
-                    turb_cfg["raw0"] = int(turb_raw)
+                    turb_cfg["raw1"] = int(turb_raw)
+                    turb_cfg["ntu1"] = ntu1_val
                     cfg["turbidity"] = turb_cfg
                     _set_last_calibration(cfg, "turbidity")
                     _save(cfg, server._save_config)
+                    saved = True
+                    msg = "濁度 NTU 校正已儲存"
+                else:
+                    msg = "濁度 NTU 儲存失敗：輸入無效"
 
-            elif step == "turb_raw_max":
-                turb_raw = _read_detail(status, "turbidity_raw", None)
-                if turb_raw is not None:
-                    turb_cfg = cfg.get("turbidity", {})
-                    turb_cfg["raw_max"] = int(turb_raw)
-                    cfg["turbidity"] = turb_cfg
-                    _set_last_calibration(cfg, "turbidity")
+        elif action == "save_tds_point":
+            tds_raw = _read_detail(status, "tds_raw", None)
+            temp_c = _read_detail(status, "temp_for_ph_tds", None)
+            ppm_text = form.get("ppm", "").strip()
+            if not ppm_text:
+                msg = "TDS 校正失敗：請輸入 ppm"
+            elif not isinstance(tds_raw, (int, float)) or not isinstance(
+                temp_c, (int, float)
+            ):
+                msg = "TDS 校正失敗：讀值無效"
+            else:
+                try:
+                    ppm_val = float(ppm_text)
+                except Exception:
+                    ppm_val = None
+                if ppm_val is not None:
+                    k_val, v_val, base_ppm = calculate_tds_k(
+                        tds_raw,
+                        temp_c,
+                        cfg.get("tds", {}).get("vref", 3.3),
+                        cfg.get("tds", {}).get("temp_compensation_factor", 0.02),
+                        ppm_val,
+                    )
+                    if k_val is not None:
+                        tds_cfg = cfg.get("tds", {})
+                        tds_cfg["k_factor"] = k_val
+                        tds_cfg["cal_ppm"] = ppm_val
+                        tds_cfg["cal_v"] = v_val
+                        tds_cfg["cal_temp"] = temp_c
+                        cfg["tds"] = tds_cfg
+                        _set_last_calibration(cfg, "tds")
+                        _save(cfg, server._save_config)
+                        saved = True
+                        msg = "TDS 校正已儲存"
+                    else:
+                        msg = "TDS 校正失敗：係數計算無效"
+                else:
+                    msg = "TDS 校正失敗：輸入無效"
+
+        elif action == "save_ec_point1":
+            ec_v = _read_detail(status, "ec_v", None)
+            us1 = form.get("us1", "").strip()
+            unit1 = form.get("unit1", "us").strip().lower()
+            if ec_v is None:
+                msg = "EC 校正點 1 失敗：讀值無效"
+            elif not us1:
+                msg = "EC 校正點 1 失敗：請輸入數值"
+            else:
+                try:
+                    us1_val = float(us1)
+                except Exception:
+                    us1_val = None
+                if us1_val is not None:
+                    if unit1 == "ms":
+                        us1_val = us1_val * 1000.0
+                    ec_cfg = cfg.get("ec", {})
+                    ec_cfg["cal_v1"] = float(ec_v)
+                    ec_cfg["cal_us1"] = us1_val
+                    cfg["ec"] = ec_cfg
+                    _set_last_calibration(cfg, "ec")
                     _save(cfg, server._save_config)
+                    saved = True
+                    msg = "EC 校正點 1 已儲存"
+                else:
+                    msg = "EC 校正點 1 失敗：輸入無效"
 
-            elif step == "turb_raw1":
-                turb_raw = _read_detail(status, "turbidity_raw", None)
-                ntu1 = form.get("ntu1", "").strip()
-                if turb_raw is not None and ntu1:
-                    try:
-                        ntu1_val = float(ntu1)
-                    except Exception:
-                        ntu1_val = None
-                    if ntu1_val is not None:
-                        turb_cfg = cfg.get("turbidity", {})
-                        turb_cfg["raw1"] = int(turb_raw)
-                        turb_cfg["ntu1"] = ntu1_val
-                        cfg["turbidity"] = turb_cfg
-                        _set_last_calibration(cfg, "turbidity")
-                        _save(cfg, server._save_config)
+        elif action == "save_ec_point2":
+            ec_v = _read_detail(status, "ec_v", None)
+            us2 = form.get("us2", "").strip()
+            unit2 = form.get("unit2", "us").strip().lower()
+            if ec_v is None:
+                msg = "EC 校正點 2 失敗：讀值無效"
+            elif not us2:
+                msg = "EC 校正點 2 失敗：請輸入數值"
+            else:
+                try:
+                    us2_val = float(us2)
+                except Exception:
+                    us2_val = None
+                if us2_val is not None:
+                    if unit2 == "ms":
+                        us2_val = us2_val * 1000.0
+                    ec_cfg = cfg.get("ec", {})
+                    ec_cfg["cal_v2"] = float(ec_v)
+                    ec_cfg["cal_us2"] = us2_val
+                    cfg["ec"] = ec_cfg
+                    _set_last_calibration(cfg, "ec")
+                    _save(cfg, server._save_config)
+                    saved = True
+                    msg = "EC 校正點 2 已儲存"
+                else:
+                    msg = "EC 校正點 2 失敗：輸入無效"
 
-            elif step == "tds_point":
-                tds_raw = _read_detail(status, "tds_raw", None)
-                temp_c = _read_detail(status, "temp_for_ph_tds", None)
-                ppm_text = form.get("ppm", "").strip()
-                if (
-                    isinstance(tds_raw, (int, float))
-                    and isinstance(temp_c, (int, float))
-                    and ppm_text
-                ):
-                    try:
-                        ppm_val = float(ppm_text)
-                    except Exception:
-                        ppm_val = None
-                    if ppm_val is not None:
-                        k_val, v_val, base_ppm = calculate_tds_k(
-                            tds_raw,
-                            temp_c,
-                            cfg.get("tds", {}).get("vref", 3.3),
-                            cfg.get("tds", {}).get("temp_compensation_factor", 0.02),
-                            ppm_val,
-                        )
-                        if k_val is not None:
-                            tds_cfg = cfg.get("tds", {})
-                            tds_cfg["k_factor"] = k_val
-                            tds_cfg["cal_ppm"] = ppm_val
-                            tds_cfg["cal_v"] = v_val
-                            tds_cfg["cal_temp"] = temp_c
-                            cfg["tds"] = tds_cfg
-                            _set_last_calibration(cfg, "tds")
-                            _save(cfg, server._save_config)
+        elif action == "save_orp_point":
+            v_sensor = _read_detail(status, "orp_v_sensor", None)
+            raw_val = _read_detail(status, "orp_raw", None)
+            is_valid = _read_detail(status, "orp_valid", True)
+            target_text = form.get("target_mv", "").strip()
+            if not target_text:
+                msg = "ORP 校正失敗：請輸入目標 mV"
+            elif v_sensor is None or not is_valid:
+                msg = "ORP 校正失敗：讀值無效"
+            else:
+                try:
+                    target_val = float(target_text)
+                except Exception:
+                    target_val = None
+                if target_val is not None:
+                    orp_cfg = cfg.get("orp", {})
+                    scale = orp_cfg.get("scale", 1.0)
+                    if not isinstance(scale, (int, float)) or scale <= 0:
+                        scale = 1.0
+                    orp_no_offset = (float(v_sensor) - 2.0) * 1000.0 * scale
+                    orp_cfg["offset_mv"] = round(target_val - orp_no_offset, 2)
+                    orp_cfg["cal_target_mv"] = float(target_val)
+                    orp_cfg["cal_v_sensor"] = round(float(v_sensor), 3)
+                    orp_cfg["cal_raw"] = (
+                        int(raw_val) if isinstance(raw_val, (int, float)) else None
+                    )
+                    cfg["orp"] = orp_cfg
+                    _set_last_calibration(cfg, "orp")
+                    _save(cfg, server._save_config)
+                    saved = True
+                    msg = "ORP 校正已儲存"
+                else:
+                    msg = "ORP 校正失敗：輸入無效"
 
-            elif step == "ec_point1":
-                ec_v = _read_detail(status, "ec_v", None)
-                us1 = form.get("us1", "").strip()
-                unit1 = form.get("unit1", "us").strip().lower()
-                if ec_v is not None and us1:
-                    try:
-                        us1_val = float(us1)
-                    except Exception:
-                        us1_val = None
-                    if us1_val is not None:
-                        if unit1 == "ms":
-                            us1_val = us1_val * 1000.0
-                        ec_cfg = cfg.get("ec", {})
-                        ec_cfg["cal_v1"] = float(ec_v)
-                        ec_cfg["cal_us1"] = us1_val
-                        cfg["ec"] = ec_cfg
-                        _set_last_calibration(cfg, "ec")
-                        _save(cfg, server._save_config)
-
-            elif step == "ec_point2":
-                ec_v = _read_detail(status, "ec_v", None)
-                us2 = form.get("us2", "").strip()
-                unit2 = form.get("unit2", "us").strip().lower()
-                if ec_v is not None and us2:
-                    try:
-                        us2_val = float(us2)
-                    except Exception:
-                        us2_val = None
-                    if us2_val is not None:
-                        if unit2 == "ms":
-                            us2_val = us2_val * 1000.0
-                        ec_cfg = cfg.get("ec", {})
-                        ec_cfg["cal_v2"] = float(ec_v)
-                        ec_cfg["cal_us2"] = us2_val
-                        cfg["ec"] = ec_cfg
-                        _set_last_calibration(cfg, "ec")
-                        _save(cfg, server._save_config)
-
-
-            elif step == "orp_point":
-                v_sensor = _read_detail(status, "orp_v_sensor", None)
-                raw_val = _read_detail(status, "orp_raw", None)
-                is_valid = _read_detail(status, "orp_valid", True)
-                target_text = form.get("target_mv", "").strip()
-                if v_sensor is not None and target_text and is_valid:
-                    try:
-                        target_val = float(target_text)
-                    except Exception:
-                        target_val = None
-                    if target_val is not None:
-                        orp_cfg = cfg.get("orp", {})
-                        scale = orp_cfg.get("scale", 1.0)
-                        if not isinstance(scale, (int, float)) or scale <= 0:
-                            scale = 1.0
-                        orp_no_offset = (float(v_sensor) - 2.0) * 1000.0 * scale
-                        orp_cfg["offset_mv"] = round(target_val - orp_no_offset, 2)
-                        orp_cfg["cal_target_mv"] = float(target_val)
-                        orp_cfg["cal_v_sensor"] = round(float(v_sensor), 3)
-                        orp_cfg["cal_raw"] = int(raw_val) if isinstance(raw_val, (int, float)) else None
-                        cfg["orp"] = orp_cfg
-                        _set_last_calibration(cfg, "orp")
-                        _save(cfg, server._save_config)
-
-            server._redirect(
-                server._client,
-                server._base_path + "/calibration?step={}".format(_next_step(step)),
-            )
+        if action:
+            if saved:
+                server._message = msg
+            else:
+                server._message = msg or "儲存失敗：讀值無效"
+            server._redirect(server._client, server._base_path + "/calibration")
             return True
 
     # GET 顯示頁面
@@ -380,13 +441,13 @@ def handle_calibration(server, method, body):
     web_mode = cfg.get("web", {}).get("mode", "normal")
 
     if web_mode != "calibration":
-        content = """<p>校正頁面需先切換為「校正模式」才能使用。</p>
-<p class="muted">請到「系統」→「網頁管理」把模式改成校正，或使用下方按鈕切換。</p>
+        content = """<p>校正頁面僅能在「校正模式」下使用。</p>
+<p class="muted">請到「系統」→「網頁管理」切換模式或使用下方按鈕。</p>
 <form method="post" action="{action}">
   <input type="hidden" name="action" value="set_mode_calibration" />
-  <button class="btn" type="submit">切換到校正模式</button>
+  <button class="btn" type="submit">切換至校正模式</button>
 </form>""".format(
-            action=server._base_path + "/calibration?step=intro"
+            action=server._base_path + "/calibration"
         )
         html = render_calibration_page(
             server._base_path, "校正模式", content, message, refresh_s=0
@@ -394,229 +455,193 @@ def handle_calibration(server, method, body):
         server._send_response(server._client, 200, {"Content-Type": "text/html"}, html)
         return True
 
-    if step == "intro":
-        content = """<p>校正前請準備以下物品：</p>
-  <ul>
-    <li>蒸餾水（濁度/清洗）</li>
-    <li>pH 4/7/10 緩衝液</li>
-    <li>TDS 標準液（例如 1413 ppm）</li>
-    <li>EC 標準液（例如 1413 uS/cm、12.88 mS/cm）</li>
-    <li>ORP 標準液（例如 222 mV@25C）</li>
-  </ul>
-<form method="post" action="{action}">
-  <input type="hidden" name="action" value="confirm" />
-  <button class="btn" type="submit">開始校正</button>
-</form>""".format(
-            action=server._base_path + "/calibration?step=intro"
-        )
-        html = render_calibration_page(
-            server._base_path, "校正模式", content, message, refresh_s=refresh_s
-        )
-        server._send_response(server._client, 200, {"Content-Type": "text/html"}, html)
-        return True
+    ph_v = _read_detail(status, "ph_v", "NA")
+    ph_val = _read_detail(status, "ph", "NA")
+    temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
+    ph_value_html = (
+        '電壓 <span data-live-key="ph_v" data-live-unit=" V">{}</span>'
+        " / "
+        '檢測值 <span data-live-key="ph">{}</span>'
+        " / "
+        '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+    ).format(ph_v, ph_val, temp_c)
 
-    if step == "ph7":
-        ph_v = _read_detail(status, "ph_v", "NA")
-        ph_val = _read_detail(status, "ph", "NA")
-        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
-        value_html = (
-            '電壓 <span data-live-key="ph_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 <span data-live-key="ph">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
-        ).format(ph_v, ph_val, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "pH 7 校正",
-            "請將探頭放入 pH7 緩衝液，數值穩定後按確認",
-            "",
-            server._base_path + "/calibration?step=ph7",
-            [],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "ph4":
-        ph_v = _read_detail(status, "ph_v", "NA")
-        ph_val = _read_detail(status, "ph", "NA")
-        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
-        value_html = (
-            '電壓 <span data-live-key="ph_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 <span data-live-key="ph">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
-        ).format(ph_v, ph_val, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "pH 4 校正",
-            "請將探頭放入 pH4 緩衝液，數值穩定後按確認",
-            "",
-            server._base_path + "/calibration?step=ph4",
-            [],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "ph10":
-        ph_v = _read_detail(status, "ph_v", "NA")
-        ph_val = _read_detail(status, "ph", "NA")
-        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
-        value_html = (
-            '電壓 <span data-live-key="ph_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 <span data-live-key="ph">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
-        ).format(ph_v, ph_val, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "pH 10 校正",
-            "請將探頭放入 pH10 緩衝液，數值穩定後按確認",
-            "",
-            server._base_path + "/calibration?step=ph10",
-            [],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "temp_match":
-        temp_shallow = _read_detail(status, "temp_shallow", "NA")
-        temp_deep = _read_detail(status, "temp_deep", "NA")
-        value_html = (
-            "電壓 NA / "
-            '檢測值(淺層) <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
-            " / "
-            '溫度(深層) <span data-live-key="temp_deep" data-live-unit=" C">{}</span>'
-        ).format(temp_shallow, temp_deep)
-        html = render_calibration_step(
-            server._base_path,
-            "溫度校正",
-            "請將兩個探頭放在同一容器，數值穩定後按確認",
-            "",
-            server._base_path + "/calibration?step=temp_match",
-            [],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "turb_raw0":
-        turb_raw = _read_detail(status, "turbidity_raw", "NA")
-        turb_v = _read_detail(status, "turbidity_v", "NA")
-        turb_ntu = _read_detail(status, "turbidity_ntu", "NA")
-        temp_c = _read_detail(status, "temp_shallow", "NA")
-        value_html = (
-            '電壓 <span data-live-key="turbidity_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 raw <span data-live-key="turbidity_raw">{}</span>'
-            " / "
-            'NTU <span data-live-key="turbidity_ntu">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
-        ).format(turb_v, turb_raw, turb_ntu, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "濁度 0 NTU 校正",
-            "請將探頭放入清水（0 NTU），數值穩定後按確認",
-            "",
-            server._base_path + "/calibration?step=turb_raw0",
-            [],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "turb_raw_max":
-        turb_raw = _read_detail(status, "turbidity_raw", "NA")
-        turb_v = _read_detail(status, "turbidity_v", "NA")
-        turb_ntu = _read_detail(status, "turbidity_ntu", "NA")
-        temp_c = _read_detail(status, "temp_shallow", "NA")
-        value_html = (
-            '電壓 <span data-live-key="turbidity_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 raw <span data-live-key="turbidity_raw">{}</span>'
-            " / "
-            'NTU <span data-live-key="turbidity_ntu">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
-        ).format(turb_v, turb_raw, turb_ntu, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "濁度 相對上限校正",
-            "請將探頭放入最濁狀態（作為 100%），數值穩定後按確認",
-            "",
-            server._base_path + "/calibration?step=turb_raw_max",
-            [],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "turb_raw1":
-        turb_raw = _read_detail(status, "turbidity_raw", "NA")
-        turb_v = _read_detail(status, "turbidity_v", "NA")
-        turb_ntu = _read_detail(status, "turbidity_ntu", "NA")
-        temp_c = _read_detail(status, "temp_shallow", "NA")
-        value_html = (
-            '電壓 <span data-live-key="turbidity_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 raw <span data-live-key="turbidity_raw">{}</span>'
-            " / "
-            'NTU <span data-live-key="turbidity_ntu">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
-        ).format(turb_v, turb_raw, turb_ntu, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "濁度 NTU 校正",
-            "請將探頭放入已知 NTU 溶液，輸入 NTU 後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
-            "",
-            server._base_path + "/calibration?step=turb_raw1",
-            [{"label": "NTU 值", "name": "ntu1", "value": "", "input": "number", "step": "0.1"}],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "tds_point":
-        tds_v = _read_detail(status, "tds_v", "NA")
-        tds_ppm = _read_detail(status, "tds_ppm", "NA")
-        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
-        value_html = (
-            '電壓 <span data-live-key="tds_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 <span data-live-key="tds_ppm" data-live-unit=" ppm">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
-        ).format(tds_v, tds_ppm, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "TDS 校正",
-            "請將探頭放入 TDS 標準液，輸入 ppm 後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
-            "",
-            server._base_path + "/calibration?step=tds_point",
-            [{"label": "ppm", "name": "ppm", "value": "1413", "input": "number", "step": "0.1"}],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "ec_point1":
-        ec_v = _read_detail(status, "ec_v", "NA")
-        ec_us = _read_detail(status, "ec_us", "NA")
-        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
-        value_html = (
-            '電壓 <span data-live-key="ec_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 <span data-live-key="ec_us" data-live-unit=" uS/cm">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
-        ).format(ec_v, ec_us, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "EC 校正點 1",
-            "請將探頭放入標準液，輸入數值並選擇單位後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
-            "",
-            server._base_path + "/calibration?step=ec_point1",
-            [
-                {"label": "數值", "name": "us1", "value": "1413", "input": "number", "step": "0.1"},
+    temp_shallow = _read_detail(status, "temp_shallow", "NA")
+    temp_deep = _read_detail(status, "temp_deep", "NA")
+    temp_value_html = (
+        '淺層 <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
+        " / "
+        '深層 <span data-live-key="temp_deep" data-live-unit=" C">{}</span>'
+    ).format(temp_shallow, temp_deep)
+
+    turb_raw = _read_detail(status, "turbidity_raw", "NA")
+    turb_v = _read_detail(status, "turbidity_v", "NA")
+    turb_ntu = _read_detail(status, "turbidity_ntu", "NA")
+    turb_temp = _read_detail(status, "temp_shallow", "NA")
+    turb_value_html = (
+        '電壓 <span data-live-key="turbidity_v" data-live-unit=" V">{}</span>'
+        " / "
+        '檢測值 raw <span data-live-key="turbidity_raw">{}</span>'
+        " / "
+        'NTU <span data-live-key="turbidity_ntu">{}</span>'
+        " / "
+        '溫度 <span data-live-key="temp_shallow" data-live-unit=" C">{}</span>'
+    ).format(turb_v, turb_raw, turb_ntu, turb_temp)
+
+    tds_v = _read_detail(status, "tds_v", "NA")
+    tds_ppm = _read_detail(status, "tds_ppm", "NA")
+    tds_temp = _read_detail(status, "temp_for_ph_tds", "NA")
+    tds_value_html = (
+        '電壓 <span data-live-key="tds_v" data-live-unit=" V">{}</span>'
+        " / "
+        '檢測值 <span data-live-key="tds_ppm" data-live-unit=" ppm">{}</span>'
+        " / "
+        '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+    ).format(tds_v, tds_ppm, tds_temp)
+
+    ec_v = _read_detail(status, "ec_v", "NA")
+    ec_us = _read_detail(status, "ec_us", "NA")
+    ec_temp = _read_detail(status, "temp_for_ph_tds", "NA")
+    ec_value_html = (
+        '電壓 <span data-live-key="ec_v" data-live-unit=" V">{}</span>'
+        " / "
+        '檢測值 <span data-live-key="ec_us" data-live-unit=" uS/cm">{}</span>'
+        " / "
+        '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+    ).format(ec_v, ec_us, ec_temp)
+
+    orp_v = _read_detail(status, "orp_v_sensor", "NA")
+    orp_mv = _read_detail(status, "orp_mv", "NA")
+    orp_temp = _read_detail(status, "temp_for_ph_tds", "NA")
+    orp_value_html = (
+        '電壓 <span data-live-key="orp_v_sensor" data-live-unit=" V">{}</span>'
+        " / "
+        '檢測值 <span data-live-key="orp_mv" data-live-unit=" mV">{}</span>'
+        " / "
+        '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
+    ).format(orp_v, orp_mv, orp_temp)
+
+    turb_cfg = cfg.get("turbidity", {})
+    tds_cfg = cfg.get("tds", {})
+    ec_cfg = cfg.get("ec", {})
+    orp_cfg = cfg.get("orp", {})
+
+    ntu1_value = turb_cfg.get("ntu1")
+    tds_ppm_value = tds_cfg.get("cal_ppm")
+    if not isinstance(tds_ppm_value, (int, float)):
+        tds_ppm_value = 1413
+    ec_us1_value = ec_cfg.get("cal_us1")
+    if not isinstance(ec_us1_value, (int, float)):
+        ec_us1_value = 1413
+    ec_us2_value = ec_cfg.get("cal_us2")
+    if isinstance(ec_us2_value, (int, float)):
+        ec_us2_display = round(ec_us2_value / 1000.0, 3)
+    else:
+        ec_us2_display = 12.88
+    orp_target_value = orp_cfg.get("cal_target_mv")
+    if not isinstance(orp_target_value, (int, float)):
+        orp_target_value = 222
+
+    prompt = """<div class="prompt">
+  <span>校正模式中，請將探頭放入標準液並等待數值穩定後再儲存。</span>
+  <form method="post" action="{action}">
+    <input type="hidden" name="action" value="set_mode_normal" />
+    <button class="btn secondary" type="submit">切回一般模式</button>
+  </form>
+</div>
+<p class="muted">建議準備：清水、pH 4/7/10 緩衝液、TDS/EC/ORP 標準液。</p>""".format(
+        action=server._base_path + "/calibration"
+    )
+
+    sections = [
+        {
+            "title": "pH 7 校正",
+            "tip": "請將探頭放入 pH7 緩衝液，數值穩定後按儲存。",
+            "value_html": ph_value_html,
+            "action": "save_ph7",
+            "button_text": "儲存 pH7",
+        },
+        {
+            "title": "pH 4 校正",
+            "tip": "請將探頭放入 pH4 緩衝液，數值穩定後按儲存。",
+            "value_html": ph_value_html,
+            "action": "save_ph4",
+            "button_text": "儲存 pH4",
+        },
+        {
+            "title": "pH 10 校正",
+            "tip": "請將探頭放入 pH10 緩衝液，數值穩定後按儲存。",
+            "value_html": ph_value_html,
+            "action": "save_ph10",
+            "button_text": "儲存 pH10",
+        },
+        {
+            "title": "溫度校正",
+            "tip": "請將兩個探頭放在同一容器，數值穩定後按儲存。",
+            "value_html": temp_value_html,
+            "action": "save_temp_match",
+            "button_text": "儲存溫度校正",
+        },
+        {
+            "title": "濁度 0 NTU 校正",
+            "tip": "請將探頭放入清水（0 NTU），數值穩定後按儲存。",
+            "value_html": turb_value_html,
+            "action": "save_turb_raw0",
+            "button_text": "儲存 0 NTU 校正",
+        },
+        {
+            "title": "濁度 相對上限校正",
+            "tip": "請將探頭放入最濁狀態（作為 100%），數值穩定後按儲存。",
+            "value_html": turb_value_html,
+            "action": "save_turb_raw_max",
+            "button_text": "儲存濁度上限",
+        },
+        {
+            "title": "濁度 NTU 校正",
+            "tip": "請將探頭放入已知 NTU 溶液，輸入 NTU 後按儲存。",
+            "value_html": turb_value_html,
+            "action": "save_turb_raw1",
+            "button_text": "儲存 NTU 校正",
+            "fields": [
+                {
+                    "label": "NTU 值",
+                    "name": "ntu1",
+                    "value": "" if ntu1_value is None else ntu1_value,
+                    "input": "number",
+                    "step": "0.1",
+                }
+            ],
+        },
+        {
+            "title": "TDS 校正",
+            "tip": "請將探頭放入 TDS 標準液，輸入 ppm 後按儲存。",
+            "value_html": tds_value_html,
+            "action": "save_tds_point",
+            "button_text": "儲存 TDS 校正",
+            "fields": [
+                {
+                    "label": "ppm",
+                    "name": "ppm",
+                    "value": tds_ppm_value,
+                    "input": "number",
+                    "step": "0.1",
+                }
+            ],
+        },
+        {
+            "title": "EC 校正點 1",
+            "tip": "請將探頭放入標準液，輸入數值並選擇單位後按儲存。",
+            "value_html": ec_value_html,
+            "action": "save_ec_point1",
+            "button_text": "儲存 EC 點 1",
+            "fields": [
+                {
+                    "label": "數值",
+                    "name": "us1",
+                    "value": ec_us1_value,
+                    "input": "number",
+                    "step": "0.1",
+                },
                 {
                     "label": "單位",
                     "name": "unit1",
@@ -625,29 +650,21 @@ def handle_calibration(server, method, body):
                     "options": [("us", "uS/cm"), ("ms", "mS/cm")],
                 },
             ],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "ec_point2":
-        ec_v = _read_detail(status, "ec_v", "NA")
-        ec_us = _read_detail(status, "ec_us", "NA")
-        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
-        value_html = (
-            '電壓 <span data-live-key="ec_v" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 <span data-live-key="ec_us" data-live-unit=" uS/cm">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
-        ).format(ec_v, ec_us, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "EC 校正點 2",
-            "請將探頭放入第二標準液，輸入數值並選擇單位後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
-            "",
-            server._base_path + "/calibration?step=ec_point2",
-            [
-                {"label": "數值", "name": "us2", "value": "12.88", "input": "number", "step": "0.01"},
+        },
+        {
+            "title": "EC 校正點 2",
+            "tip": "請將探頭放入第二標準液，輸入數值並選擇單位後按儲存。",
+            "value_html": ec_value_html,
+            "action": "save_ec_point2",
+            "button_text": "儲存 EC 點 2",
+            "fields": [
+                {
+                    "label": "數值",
+                    "name": "us2",
+                    "value": ec_us2_display,
+                    "input": "number",
+                    "step": "0.01",
+                },
                 {
                     "label": "單位",
                     "name": "unit2",
@@ -656,69 +673,35 @@ def handle_calibration(server, method, body):
                     "options": [("us", "uS/cm"), ("ms", "mS/cm")],
                 },
             ],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    elif step == "orp_point":
-        orp_v = _read_detail(status, "orp_v_sensor", "NA")
-        orp_mv = _read_detail(status, "orp_mv", "NA")
-        temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
-        value_html = (
-            '電壓 <span data-live-key="orp_v_sensor" data-live-unit=" V">{}</span>'
-            " / "
-            '檢測值 <span data-live-key="orp_mv" data-live-unit=" mV">{}</span>'
-            " / "
-            '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
-        ).format(orp_v, orp_mv, temp_c)
-        html = render_calibration_step(
-            server._base_path,
-            "ORP 校正",
-            "請將探頭放入 ORP 標準液，輸入目標 mV 後按確認。輸入的校正值請以包裝上顯示的溫度所對應數值為準",
-            "",
-            server._base_path + "/calibration?step=orp_point",
-            [
-                {"label": "目標 mV", "name": "target_mv", "value": "222", "input": "number", "step": "0.1"},
+        },
+        {
+            "title": "ORP 校正",
+            "tip": "請將探頭放入 ORP 標準液，輸入目標 mV 後按儲存。",
+            "value_html": orp_value_html,
+            "action": "save_orp_point",
+            "button_text": "儲存 ORP 校正",
+            "fields": [
+                {
+                    "label": "目標 mV",
+                    "name": "target_mv",
+                    "value": orp_target_value,
+                    "input": "number",
+                    "step": "0.1",
+                }
             ],
-            message,
-            refresh_s=refresh_s,
-            value_html=value_html,
-        )
-    else:
-        ph_last = cfg.get("ph", {}).get("last_calibration_iso", "NA")
-        turb_last = cfg.get("turbidity", {}).get("last_calibration_iso", "NA")
-        ec_last = cfg.get("ec", {}).get("last_calibration_iso", "NA")
-        temp_last = cfg.get("ds18b20", {}).get("last_calibration_iso", "NA")
-        orp_last = cfg.get("orp", {}).get("last_calibration_iso", "NA")
-        content = """<p>校正完成。</p>
-<ul>
-  <li>pH：{ph}</li>
-  <li>濁度：{turb}</li>
-  <li>溫度：{temp}</li>
-  <li>EC：{ec}</li>
-  <li>ORP：{orp}</li>
-</ul>
-<p>是否切回一般模式？</p>
-<form method="post" action="{action}">
-  <input type="hidden" name="action" value="set_mode_normal" />
-  <button class="btn" type="submit">切回一般模式</button>
-</form>
-<p><a class="btn secondary" href="{home}">維持校正模式</a></p>""".format(
-            ph=ph_last,
-            turb=turb_last,
-            temp=temp_last,
-            ec=ec_last,
-            orp=orp_last,
-            home=server._base_path + "/",
-            action=server._base_path + "/calibration?step=done",
-        )
-        html = render_calibration_page(
-            server._base_path, "校正完成", content, message, refresh_s=refresh_s
-        )
+        },
+    ]
 
+    html = render_calibration_overview(
+        server._base_path,
+        "校正模式",
+        sections,
+        message,
+        refresh_s=refresh_s,
+        prompt_html=prompt,
+    )
     server._send_response(server._client, 200, {"Content-Type": "text/html"}, html)
     return True
-
 
 # 提供校正頁面即時讀值
 def handle_calibration_data(server):
