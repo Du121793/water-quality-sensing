@@ -46,6 +46,12 @@ def get_date_iso(timezone_offset_s):
     return "%04d-%02d-%02dT%02d:%02d:%02d" % (y, m, d, hh, mm, ss)
 
 
+# 取得 UTC ISO 格式字串
+def get_date_iso_utc():
+    y, m, d, hh, mm, ss, _, _ = time.gmtime()
+    return "%04d-%02d-%02dT%02d:%02d:%02d" % (y, m, d, hh, mm, ss)
+
+
 # 檢查電源穩定性
 def check_power_stability(pin, samples=5, delay_ms=10, max_delta=100):
     try:
