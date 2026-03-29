@@ -1,6 +1,7 @@
 from methods.utils import get_date_iso, get_date_iso_utc
 from methods.api import build_api_url, clone_json
 from sensors.tds import calculate_tds_k
+from sensors.do import init_do, do_apply_compensation, do_calibrate
 from ..forms import parse_form
 from ..views import (
     render_calibration_overview,
@@ -100,6 +101,10 @@ def _calibration_config_snapshot(cfg):
         "orp": _pick_fields(
             cfg.get("orp", {}),
             ["offset_mv", "cal_target_mv", "cal_v_sensor", "cal_raw", "last_calibration_iso"],
+        ),
+        "do": _pick_fields(
+            cfg.get("do", {}),
+            ["salinity_ppt", "pressure_kpa", "last_calibration_iso"],
         ),
         "ds18b20": _pick_fields(
             cfg.get("ds18b20", {}),
@@ -423,6 +428,68 @@ def handle_calibration(server, method, body):
                 else:
                     msg = "ORP 校正失敗：輸入無效"
 
+        elif action == "save_do_comp":
+            do_cfg = cfg.get("do", {})
+            if not do_cfg.get("enabled", False):
+                msg = "溶氧未啟用"
+            else:
+                salinity_text = form.get("do_salinity_ppt", "").strip()
+                pressure_text = form.get("do_pressure_kpa", "").strip()
+                salinity_val = do_cfg.get("salinity_ppt")
+                pressure_val = do_cfg.get("pressure_kpa")
+                if salinity_text:
+                    try:
+                        salinity_val = float(salinity_text)
+                    except Exception:
+                        salinity_val = None
+                        msg = "溶氧補償失敗：鹽度輸入無效"
+                if not msg and pressure_text:
+                    try:
+                        pressure_val = float(pressure_text)
+                    except Exception:
+                        pressure_val = None
+                        msg = "溶氧補償失敗：氣壓輸入無效"
+                if not msg:
+                    uart = init_do(do_cfg)
+                    ok, err = do_apply_compensation(
+                        uart,
+                        cfg,
+                        server._save_config,
+                        salinity_ppt=salinity_val,
+                        pressure_kpa=pressure_val,
+                    )
+                    if ok:
+                        saved = True
+                        msg = "溶氧補償已寫入"
+                    else:
+                        msg = "溶氧補償失敗：{}".format(err or "寫入失敗")
+
+        elif action == "save_do_zero":
+            do_cfg = cfg.get("do", {})
+            if not do_cfg.get("enabled", False):
+                msg = "溶氧未啟用"
+            else:
+                uart = init_do(do_cfg)
+                ok, err = do_calibrate(uart, cfg, server._save_config, "zero")
+                if ok:
+                    saved = True
+                    msg = "溶氧零點校正已寫入"
+                else:
+                    msg = "溶氧零點校正失敗：{}".format(err or "寫入失敗")
+
+        elif action == "save_do_span":
+            do_cfg = cfg.get("do", {})
+            if not do_cfg.get("enabled", False):
+                msg = "溶氧未啟用"
+            else:
+                uart = init_do(do_cfg)
+                ok, err = do_calibrate(uart, cfg, server._save_config, "span")
+                if ok:
+                    saved = True
+                    msg = "溶氧 100% 校正已寫入"
+                else:
+                    msg = "溶氧 100% 校正失敗：{}".format(err or "寫入失敗")
+
         if action:
             if saved:
                 server._message = msg
@@ -521,10 +588,27 @@ def handle_calibration(server, method, body):
         '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
     ).format(orp_v, orp_mv, orp_temp)
 
+    do_mg_l = _read_detail(status, "do_mg_l", "NA")
+    do_sat = _read_detail(status, "do_sat", "NA")
+    do_temp = _read_detail(status, "do_temp_c", "NA")
+    do_error = _read_detail(status, "do_error", "")
+    do_value_html = (
+        '濃度 <span data-live-key="do_mg_l" data-live-unit=" mg/L">{}</span>'
+        " / "
+        '飽和度 <span data-live-key="do_sat" data-live-unit=" %">{}</span>'
+        " / "
+        '溫度 <span data-live-key="do_temp_c" data-live-unit=" C">{}</span>'
+    ).format(do_mg_l, do_sat, do_temp)
+    if do_error:
+        do_value_html += (
+            ' / 錯誤 <span data-live-key="do_error">{}</span>'
+        ).format(do_error)
+
     turb_cfg = cfg.get("turbidity", {})
     tds_cfg = cfg.get("tds", {})
     ec_cfg = cfg.get("ec", {})
     orp_cfg = cfg.get("orp", {})
+    do_cfg = cfg.get("do", {})
 
     ntu1_value = turb_cfg.get("ntu1")
     tds_ppm_value = tds_cfg.get("cal_ppm")
@@ -541,6 +625,12 @@ def handle_calibration(server, method, body):
     orp_target_value = orp_cfg.get("cal_target_mv")
     if not isinstance(orp_target_value, (int, float)):
         orp_target_value = 222
+    do_salinity_value = do_cfg.get("salinity_ppt")
+    if not isinstance(do_salinity_value, (int, float)):
+        do_salinity_value = 0
+    do_pressure_value = do_cfg.get("pressure_kpa")
+    if not isinstance(do_pressure_value, (int, float)):
+        do_pressure_value = 101.33
 
     prompt = """<div class="prompt">
   <span>校正模式中，請將探頭放入標準液並等待數值穩定後再儲存。</span>
@@ -689,6 +779,43 @@ def handle_calibration(server, method, body):
                     "step": "0.1",
                 }
             ],
+        },
+        {
+            "title": "溶氧補償",
+            "tip": "輸入鹽度與氣壓後寫入感測器。",
+            "value_html": do_value_html,
+            "action": "save_do_comp",
+            "button_text": "寫入溶氧補償",
+            "fields": [
+                {
+                    "label": "鹽度 (‰)",
+                    "name": "do_salinity_ppt",
+                    "value": do_salinity_value,
+                    "input": "number",
+                    "step": "0.1",
+                },
+                {
+                    "label": "氣壓 (kPa)",
+                    "name": "do_pressure_kpa",
+                    "value": do_pressure_value,
+                    "input": "number",
+                    "step": "0.01",
+                },
+            ],
+        },
+        {
+            "title": "溶氧零點校正",
+            "tip": "探頭置於無氧水，數值穩定後按儲存。",
+            "value_html": do_value_html,
+            "action": "save_do_zero",
+            "button_text": "零點校正",
+        },
+        {
+            "title": "溶氧 100% 校正",
+            "tip": "探頭置於空氣或飽和水，數值穩定後按儲存。",
+            "value_html": do_value_html,
+            "action": "save_do_span",
+            "button_text": "100% 校正",
         },
     ]
 
