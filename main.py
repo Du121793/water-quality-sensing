@@ -35,6 +35,7 @@ from sensors.ph import (
     ph_cal_three_points_auto,
     ph_value,
 )
+from sensors.ph_rs485 import init_ph_rs485, ph_rs485_read
 from sensors.tds import init_tds, tds_read
 from sensors.turbidity import init_turbidity, turbidity_read
 from sensors.orp import init_orp, orp_read
@@ -57,6 +58,10 @@ def main():
 
     mcp_cfg = cfg.get("mcp3208", {})
     mcp_enabled = bool(mcp_cfg.get("enabled", False))
+    ph_cfg = cfg.get("ph", {})
+    ph_type = str(ph_cfg.get("type", "adc")).lower()
+    if ph_type not in ("adc", "rs485"):
+        ph_type = "adc"
 
     if mcp_enabled:
         spi_id = int(mcp_cfg.get("spi_id", 2))
@@ -76,14 +81,16 @@ def main():
         )
         mcp = MCP3208(spi, machine.Pin(cs_pin, machine.Pin.OUT, value=1))
 
-        ph_cfg = cfg.get("ph", {})
         turb_cfg = cfg.get("turbidity", {})
         mq_cfg = cfg.get("mq", {})
         tds_cfg = cfg.get("tds", {})
         ec_cfg = cfg.get("ec", {})
         orp_cfg = cfg.get("orp", {})
 
-        adc_ph = MCP3208ADC(mcp, ph_cfg.get("ch", 0))
+        if ph_type != "rs485":
+            adc_ph = MCP3208ADC(mcp, ph_cfg.get("ch", 0))
+        else:
+            adc_ph = None
         adc_turb = MCP3208ADC(mcp, turb_cfg.get("ch", 1))
         adc135 = MCP3208ADC(mcp, mq_cfg.get("ch_135", 2))
         adc137 = MCP3208ADC(mcp, mq_cfg.get("ch_137", 3))
@@ -91,7 +98,10 @@ def main():
         adc_ec = MCP3208ADC(mcp, ec_cfg.get("ch", 5))
         adc_orp = MCP3208ADC(mcp, orp_cfg.get("ch", 6))
     else:
-        adc_ph = init_ph(cfg["ph"]["pin"])
+        if ph_type != "rs485":
+            adc_ph = init_ph(cfg["ph"]["pin"])
+        else:
+            adc_ph = None
         adc_turb = init_turbidity(cfg["turbidity"]["pin"])
         adc135, adc137 = init_mq(cfg["mq"]["pin_135"], cfg["mq"]["pin_137"])
         adc_tds = init_tds(cfg["tds"]["pin"])
@@ -99,7 +109,33 @@ def main():
         adc_orp = init_orp(cfg.get("orp", {}).get("pin", 0))
     do_cfg = cfg.get("do", {})
     do_enabled = bool(do_cfg.get("enabled", False))
-    do_uart = init_do(do_cfg) if do_enabled else None
+
+    # 判斷 RS485 UART 參數是否與溶氧共用
+    def _rs485_same(ph_rs_cfg, do_cfg):
+        if not ph_rs_cfg or not do_cfg:
+            return False
+        return (
+            int(ph_rs_cfg.get("uart_id", 2)) == int(do_cfg.get("uart_id", 2))
+            and int(ph_rs_cfg.get("tx", 18)) == int(do_cfg.get("tx", 18))
+            and int(ph_rs_cfg.get("rx", 21)) == int(do_cfg.get("rx", 21))
+            and int(ph_rs_cfg.get("baudrate", 4800)) == int(do_cfg.get("baudrate", 4800))
+        )
+
+    ph_uart = None
+    do_uart = None
+    if ph_type == "rs485":
+        rs_cfg = ph_cfg.get("rs485", {})
+        if do_enabled and _rs485_same(rs_cfg, do_cfg):
+            shared_uart = init_ph_rs485(rs_cfg)
+            ph_uart = shared_uart
+            do_uart = shared_uart
+        else:
+            ph_uart = init_ph_rs485(rs_cfg)
+            if do_enabled:
+                do_uart = init_do(do_cfg)
+    else:
+        if do_enabled:
+            do_uart = init_do(do_cfg)
     ds_s, roms_s = init_ds18b20(cfg["ds18b20"]["pin_shallow"])
     ds_d, roms_d = init_ds18b20(cfg["ds18b20"]["pin_deep"])
 
@@ -287,9 +323,26 @@ def main():
             else:
                 temp_for_ph_tds = 25.0
 
-            ph, ph_raw, ph_v = ph_value(
-                adc_ph, temp_for_ph_tds, cal_file, cfg["ph"], adc_vref
-            )
+            if ph_type == "rs485":
+                ph_result = ph_rs485_read(ph_uart, ph_cfg)
+                if ph_result.get("ok"):
+                    ph = ph_result.get("ph")
+                    ph_temp = ph_result.get("temp_c")
+                    ph_raw = ph_result.get("raw_ph")
+                    ph_v = None
+                    ph_error = ""
+                else:
+                    ph_error = ph_result.get("error") or "read_failed"
+                    ph = last_sample.get("ph", 7.0)
+                    ph_temp = last_sample.get("ph_temp", temp_for_ph_tds)
+                    ph_raw = last_sample.get("ph_raw")
+                    ph_v = None
+            else:
+                ph, ph_raw, ph_v = ph_value(
+                    adc_ph, temp_for_ph_tds, cal_file, cfg["ph"], adc_vref
+                )
+                ph_temp = temp_for_ph_tds
+                ph_error = ""
             turb = turbidity_read(adc_turb, cfg["turbidity"], adc_vref)
             turb_raw = turb.get("raw")
             turb_percent = turb.get("percent")
@@ -340,6 +393,8 @@ def main():
                 "tds_raw": tds_raw,
                 "tds_v": tds_v,
                 "temp_for_ph_tds": temp_for_ph_tds,
+                "ph_temp": ph_temp,
+                "ph_error": ph_error,
                 "ec_raw": ec.get("raw"),
                 "ec_v": ec.get("v"),
                 "orp_raw": orp.get("raw"),
@@ -376,6 +431,7 @@ def main():
                 "溫度(淺)": t_shallow,
                 "溫度(深)": t_deep,
                 "pH": ph,
+                "pH溫度(C)": "NA" if ph_temp is None else ph_temp,
                 "濁度(raw)": turb_raw,
                 "清澈度(%)": "NA" if turb_percent is None else turb_percent,
                 "濁度(NTU)": "NA" if turb_ntu is None else turb_ntu,
@@ -393,6 +449,8 @@ def main():
                 "ph": ph,
                 "ph_raw": ph_raw,
                 "ph_v": ph_v,
+                "ph_temp": ph_temp,
+                "ph_error": ph_error,
                 "turbidity_raw": turb_raw,
                 "turbidity_percent": turb_percent,
                 "turbidity_ntu": turb_ntu,
