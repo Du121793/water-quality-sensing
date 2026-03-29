@@ -2,6 +2,7 @@ from methods.utils import get_date_iso, get_date_iso_utc
 from methods.api import build_api_url, clone_json
 from sensors.tds import calculate_tds_k
 from sensors.do import init_do, do_apply_compensation, do_calibrate
+from sensors.ph_rs485 import init_ph_rs485, ph_rs485_calibrate_point
 from ..forms import parse_form
 from ..views import (
     render_calibration_overview,
@@ -185,7 +186,86 @@ def handle_calibration(server, method, body):
         saved = False
         msg = ""
 
-        if action == "save_ph7":
+        if action == "save_ph_rs485_point1":
+            ph_cfg = cfg.get("ph", {})
+            if ph_cfg.get("type") != "rs485":
+                msg = "pH 類型不是 RS485"
+            else:
+                ph_text = form.get("ph_rs485_point1", "").strip()
+                if not ph_text:
+                    msg = "pH RS485 校正點 1 失敗：請輸入值"
+                else:
+                    try:
+                        ph_val = float(ph_text)
+                    except Exception:
+                        ph_val = None
+                    if ph_val is None:
+                        msg = "pH RS485 校正點 1 失敗：輸入無效"
+                    else:
+                        uart = init_ph_rs485(ph_cfg.get("rs485", {}))
+                        ok, err = ph_rs485_calibrate_point(uart, ph_cfg, 1, ph_val)
+                        if ok:
+                            rs_cfg = ph_cfg.get("rs485", {})
+                            rs_cfg["cal_point1"] = ph_val
+                            ph_cfg["rs485"] = rs_cfg
+                            cfg["ph"] = ph_cfg
+                            _set_last_calibration(cfg, "ph")
+                            _save(cfg, server._save_config)
+                            saved = True
+                            msg = "pH RS485 校正點 1 已寫入"
+                        else:
+                            msg = "pH RS485 校正點 1 失敗：{}".format(
+                                err or "寫入失敗"
+                            )
+
+        elif action == "save_ph_rs485_point2":
+            ph_cfg = cfg.get("ph", {})
+            if ph_cfg.get("type") != "rs485":
+                msg = "pH 類型不是 RS485"
+            else:
+                ph_text = form.get("ph_rs485_point2", "").strip()
+                if not ph_text:
+                    msg = "pH RS485 校正點 2 失敗：請輸入值"
+                else:
+                    try:
+                        ph_val = float(ph_text)
+                    except Exception:
+                        ph_val = None
+                    if ph_val is None:
+                        msg = "pH RS485 校正點 2 失敗：輸入無效"
+                    else:
+                        uart = init_ph_rs485(ph_cfg.get("rs485", {}))
+                        ok, err = ph_rs485_calibrate_point(uart, ph_cfg, 2, ph_val)
+                        if ok:
+                            rs_cfg = ph_cfg.get("rs485", {})
+                            rs_cfg["cal_point2"] = ph_val
+                            ph_cfg["rs485"] = rs_cfg
+                            cfg["ph"] = ph_cfg
+                            _set_last_calibration(cfg, "ph")
+                            _save(cfg, server._save_config)
+                            saved = True
+                            msg = "pH RS485 校正點 2 已寫入"
+                        else:
+                            msg = "pH RS485 校正點 2 失敗：{}".format(
+                                err or "寫入失敗"
+                            )
+
+        elif action == "save_ph_rs485_verify7":
+            ph_cfg = cfg.get("ph", {})
+            if ph_cfg.get("type") != "rs485":
+                msg = "pH 類型不是 RS485"
+            else:
+                ph_val = _read_detail(status, "ph", None)
+                ph_err = _read_detail(status, "ph_error", "")
+                if ph_err:
+                    msg = "pH 7 驗證失敗：{}".format(ph_err)
+                elif not isinstance(ph_val, (int, float)):
+                    msg = "pH 7 驗證失敗：讀值無效"
+                else:
+                    saved = True
+                    msg = "pH 7 驗證完成（未寫入探頭）"
+
+        elif action == "save_ph7":
             ph_v = _read_detail(status, "ph_v", None)
             if ph_v is not None:
                 ph_cfg = cfg.get("ph", {})
@@ -522,9 +602,15 @@ def handle_calibration(server, method, body):
         server._send_response(server._client, 200, {"Content-Type": "text/html"}, html)
         return True
 
+    ph_cfg = cfg.get("ph", {})
+    ph_type = str(ph_cfg.get("type", "adc")).lower()
+    if ph_type not in ("adc", "rs485"):
+        ph_type = "adc"
     ph_v = _read_detail(status, "ph_v", "NA")
     ph_val = _read_detail(status, "ph", "NA")
     temp_c = _read_detail(status, "temp_for_ph_tds", "NA")
+    ph_temp = _read_detail(status, "ph_temp", "NA")
+    ph_error = _read_detail(status, "ph_error", "")
     ph_value_html = (
         '電壓 <span data-live-key="ph_v" data-live-unit=" V">{}</span>'
         " / "
@@ -532,6 +618,15 @@ def handle_calibration(server, method, body):
         " / "
         '溫度 <span data-live-key="temp_for_ph_tds" data-live-unit=" C">{}</span>'
     ).format(ph_v, ph_val, temp_c)
+    ph_value_html_rs485 = (
+        '檢測值 <span data-live-key="ph">{}</span>'
+        " / "
+        '溫度 <span data-live-key="ph_temp" data-live-unit=" C">{}</span>'
+    ).format(ph_val, ph_temp)
+    if ph_error:
+        ph_value_html_rs485 += (
+            ' / 錯誤 <span data-live-key="ph_error">{}</span>'
+        ).format(ph_error)
 
     temp_shallow = _read_detail(status, "temp_shallow", "NA")
     temp_deep = _read_detail(status, "temp_deep", "NA")
@@ -632,6 +727,7 @@ def handle_calibration(server, method, body):
     if not isinstance(do_pressure_value, (int, float)):
         do_pressure_value = 101.33
 
+    ph_prompt = "建議準備：清水、pH 4/7/10 緩衝液、TDS/EC/ORP 標準液。"
     prompt = """<div class="prompt">
   <span>校正模式中，請將探頭放入標準液並等待數值穩定後再儲存。</span>
   <form method="post" action="{action}">
@@ -639,32 +735,91 @@ def handle_calibration(server, method, body):
     <button class="btn secondary" type="submit">切回一般模式</button>
   </form>
 </div>
-<p class="muted">建議準備：清水、pH 4/7/10 緩衝液、TDS/EC/ORP 標準液。</p>""".format(
-        action=server._base_path + "/calibration"
+<p class="muted">{ph_prompt}</p>""".format(
+        action=server._base_path + "/calibration",
+        ph_prompt=ph_prompt,
     )
 
-    sections = [
-        {
-            "title": "pH 7 校正",
-            "tip": "請將探頭放入 pH7 緩衝液，數值穩定後按儲存。",
-            "value_html": ph_value_html,
-            "action": "save_ph7",
-            "button_text": "儲存 pH7",
-        },
-        {
-            "title": "pH 4 校正",
-            "tip": "請將探頭放入 pH4 緩衝液，數值穩定後按儲存。",
-            "value_html": ph_value_html,
-            "action": "save_ph4",
-            "button_text": "儲存 pH4",
-        },
-        {
-            "title": "pH 10 校正",
-            "tip": "請將探頭放入 pH10 緩衝液，數值穩定後按儲存。",
-            "value_html": ph_value_html,
-            "action": "save_ph10",
-            "button_text": "儲存 pH10",
-        },
+    sections = []
+    if ph_type == "rs485":
+        rs_cfg = ph_cfg.get("rs485", {})
+        point1_value = rs_cfg.get("cal_point1")
+        point2_value = rs_cfg.get("cal_point2")
+        if not isinstance(point1_value, (int, float)):
+            point1_value = 4.0
+        if not isinstance(point2_value, (int, float)):
+            point2_value = 10.0
+        sections.extend(
+            [
+                {
+                    "title": "pH RS485 校正點 1",
+                    "tip": "請將探頭放入 pH4 緩衝液，輸入 pH 值後按儲存。",
+                    "value_html": ph_value_html_rs485,
+                    "action": "save_ph_rs485_point1",
+                    "button_text": "寫入校正點 1",
+                    "fields": [
+                        {
+                            "label": "pH 值",
+                            "name": "ph_rs485_point1",
+                            "value": point1_value,
+                            "input": "number",
+                            "step": "0.01",
+                        }
+                    ],
+                },
+                {
+                    "title": "pH RS485 校正點 2",
+                    "tip": "請將探頭放入 pH10 緩衝液，輸入 pH 值後按儲存。",
+                    "value_html": ph_value_html_rs485,
+                    "action": "save_ph_rs485_point2",
+                    "button_text": "寫入校正點 2",
+                    "fields": [
+                        {
+                            "label": "pH 值",
+                            "name": "ph_rs485_point2",
+                            "value": point2_value,
+                            "input": "number",
+                            "step": "0.01",
+                        }
+                    ],
+                },
+                {
+                    "title": "pH 7 驗證",
+                    "tip": "請將探頭放入 pH7 緩衝液，確認讀值是否接近 7.00。",
+                    "value_html": ph_value_html_rs485,
+                    "action": "save_ph_rs485_verify7",
+                    "button_text": "確認 pH7",
+                },
+            ]
+        )
+    else:
+        sections.extend(
+            [
+                {
+                    "title": "pH 7 校正",
+                    "tip": "請將探頭放入 pH7 緩衝液，數值穩定後按儲存。",
+                    "value_html": ph_value_html,
+                    "action": "save_ph7",
+                    "button_text": "儲存 pH7",
+                },
+                {
+                    "title": "pH 4 校正",
+                    "tip": "請將探頭放入 pH4 緩衝液，數值穩定後按儲存。",
+                    "value_html": ph_value_html,
+                    "action": "save_ph4",
+                    "button_text": "儲存 pH4",
+                },
+                {
+                    "title": "pH 10 校正",
+                    "tip": "請將探頭放入 pH10 緩衝液，數值穩定後按儲存。",
+                    "value_html": ph_value_html,
+                    "action": "save_ph10",
+                    "button_text": "儲存 pH10",
+                },
+            ]
+        )
+    sections.extend(
+        [
         {
             "title": "溫度校正",
             "tip": "請將兩個探頭放在同一容器，數值穩定後按儲存。",
@@ -817,7 +972,8 @@ def handle_calibration(server, method, body):
             "action": "save_do_span",
             "button_text": "100% 校正",
         },
-    ]
+        ]
+    )
 
     html = render_calibration_overview(
         server._base_path,

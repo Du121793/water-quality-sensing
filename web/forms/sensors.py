@@ -7,12 +7,18 @@ def build_sensor_fields(cfg):
     adc = cfg.get("adc", {})
     mcp_cfg = cfg.get("mcp3208", {})
     ph = cfg.get("ph", {})
+    ph_type = str(ph.get("type", "adc")).lower()
+    if ph_type not in ("adc", "rs485"):
+        ph_type = "adc"
+    ph_is_rs485 = ph_type == "rs485"
+    rs485_cfg = ph.get("rs485", {})
     turb = cfg.get("turbidity", {})
     mq = cfg.get("mq", {})
     ds = cfg.get("ds18b20", {})
     tds = cfg.get("tds", {})
     ec = cfg.get("ec", {})
     orp = cfg.get("orp", {})
+    do_cfg = cfg.get("do", {})
     mcp_enabled = bool(mcp_cfg.get("enabled", False))
     web_cfg = cfg.get("web", {})
     base_path = "/" + web_cfg.get("base_path", "admin").strip("/")
@@ -71,20 +77,41 @@ def build_sensor_fields(cfg):
             "input": "number",
         },
         {"type": "section", "label": "pH"},
-        {"label": "pH 腳位", "name": "ph_pin", "value": ph.get("pin", 0), "input": "number", "disabled": mcp_enabled},
-        {"label": "pH CH", "name": "ph_ch", "value": ph.get("ch", 0), "input": "number", "disabled": not mcp_enabled},
+        {
+            "label": "pH 類型",
+            "name": "ph_type",
+            "value": ph_type,
+            "input": "select",
+            "options": [("adc", "類比(ADC)"), ("rs485", "RS485")],
+        },
+        {"label": "pH 腳位", "name": "ph_pin", "value": ph.get("pin", 0), "input": "number", "disabled": mcp_enabled or ph_is_rs485},
+        {"label": "pH CH", "name": "ph_ch", "value": ph.get("ch", 0), "input": "number", "disabled": not mcp_enabled or ph_is_rs485},
         {"label": "pH 最小值", "name": "ph_min", "value": ph.get("min", 0.0), "input": "number", "step": "0.01"},
         {"label": "pH 最大值", "name": "ph_max", "value": ph.get("max", 14.0), "input": "number", "step": "0.01"},
         {"label": "平滑視窗", "name": "ph_smoothing_window", "value": ph.get("smoothing_window", 5), "input": "number"},
         {"type": "section", "label": "pH 校正"},
-        {"label": "使用程式校正", "name": "ph_use_code_calibration", "value": "1" if ph.get("use_code_calibration", True) else "0", "input": "select", "options": [("1", "啟用"), ("0", "停用")]},
-        {"label": "校正電壓 pH4.01", "name": "ph_cal_voltage_ph4", "value": ph.get("calibration_voltages", {}).get("ph4", 0.0), "input": "number", "step": "0.001"},
-        {"label": "校正電壓 pH7.0", "name": "ph_cal_voltage_ph7", "value": ph.get("calibration_voltages", {}).get("ph7", 0.0), "input": "number", "step": "0.001"},
-        {"label": "校正電壓 pH10.01", "name": "ph_cal_voltage_ph10", "value": ph.get("calibration_voltages", {}).get("ph10", 0.0), "input": "number", "step": "0.001"},
+        {"label": "使用程式校正", "name": "ph_use_code_calibration", "value": "1" if ph.get("use_code_calibration", True) else "0", "input": "select", "options": [("1", "啟用"), ("0", "停用")], "disabled": ph_is_rs485},
+        {"label": "校正電壓 pH4.01", "name": "ph_cal_voltage_ph4", "value": ph.get("calibration_voltages", {}).get("ph4", 0.0), "input": "number", "step": "0.001", "disabled": ph_is_rs485},
+        {"label": "校正電壓 pH7.0", "name": "ph_cal_voltage_ph7", "value": ph.get("calibration_voltages", {}).get("ph7", 0.0), "input": "number", "step": "0.001", "disabled": ph_is_rs485},
+        {"label": "校正電壓 pH10.01", "name": "ph_cal_voltage_ph10", "value": ph.get("calibration_voltages", {}).get("ph10", 0.0), "input": "number", "step": "0.001", "disabled": ph_is_rs485},
         {"type": "section", "label": "pH 分壓"},
-        {"label": "分壓電阻上 (Ohm)", "name": "ph_divider_r_top", "value": ph.get("divider", {}).get("r_top", 0), "input": "number"},
-        {"label": "分壓電阻下 (Ohm)", "name": "ph_divider_r_bot", "value": ph.get("divider", {}).get("r_bot", 0), "input": "number"},
+        {"label": "分壓電阻上 (Ohm)", "name": "ph_divider_r_top", "value": ph.get("divider", {}).get("r_top", 0), "input": "number", "disabled": ph_is_rs485},
+        {"label": "分壓電阻下 (Ohm)", "name": "ph_divider_r_bot", "value": ph.get("divider", {}).get("r_bot", 0), "input": "number", "disabled": ph_is_rs485},
         {"label": "pH 除錯輸出", "name": "ph_debug", "value": "1" if ph.get("debug", False) else "0", "input": "select", "options": [("1", "啟用"), ("0", "停用")]},
+        {"type": "section", "label": "pH RS485"},
+        {"label": "UART ID", "name": "ph_rs485_uart_id", "value": rs485_cfg.get("uart_id", 2), "input": "number", "disabled": not ph_is_rs485},
+        {"label": "TX 腳位", "name": "ph_rs485_tx", "value": rs485_cfg.get("tx", 18), "input": "number", "disabled": not ph_is_rs485},
+        {"label": "RX 腳位", "name": "ph_rs485_rx", "value": rs485_cfg.get("rx", 21), "input": "number", "disabled": not ph_is_rs485},
+        {"label": "鮑率", "name": "ph_rs485_baudrate", "value": rs485_cfg.get("baudrate", 4800), "input": "number", "disabled": not ph_is_rs485},
+        {"label": "Modbus 位址", "name": "ph_rs485_addr", "value": rs485_cfg.get("addr", 3), "input": "number", "disabled": not ph_is_rs485},
+        {"label": "逾時 (ms)", "name": "ph_rs485_timeout_ms", "value": rs485_cfg.get("timeout_ms", 300), "input": "number", "disabled": not ph_is_rs485},
+        {"label": "重試次數", "name": "ph_rs485_retries", "value": rs485_cfg.get("retries", 1), "input": "number", "disabled": not ph_is_rs485},
+        {
+            "type": "html",
+            "html": "<tr><th>pH RS485 即時讀值</th><td>pH <span data-live-key=\"ph\">NA</span> / 溫度 <span data-live-key=\"ph_temp\">NA</span> C / 錯誤 <span data-live-key=\"ph_error\">NA</span></td></tr>"
+            if ph_is_rs485
+            else "",
+        },
         {"type": "section", "label": "濁度"},
         {"label": "濁度腳位", "name": "turbidity_pin", "value": turb.get("pin", 0), "input": "number", "disabled": mcp_enabled},
         {"label": "Turbidity CH", "name": "turbidity_ch", "value": turb.get("ch", 0), "input": "number", "disabled": not mcp_enabled},
@@ -182,6 +209,28 @@ def build_sensor_fields(cfg):
                 data_url=data_url
             ),
         },
+        {"type": "section", "label": "溶氧 (DO)"},
+        {
+            "label": "溶氧啟用",
+            "name": "do_enabled",
+            "value": "1" if do_cfg.get("enabled", False) else "0",
+            "input": "select",
+            "options": [("1", "啟用"), ("0", "停用")],
+        },
+        {
+            "label": "UART ID",
+            "name": "do_uart_id",
+            "value": do_cfg.get("uart_id", 2),
+            "input": "number",
+            "help": "與 pH RS485 共用時，UART 參數需一致",
+        },
+        {"label": "TX 腳位", "name": "do_tx", "value": do_cfg.get("tx", 18), "input": "number"},
+        {"label": "RX 腳位", "name": "do_rx", "value": do_cfg.get("rx", 21), "input": "number"},
+        {"label": "鮑率", "name": "do_baudrate", "value": do_cfg.get("baudrate", 4800), "input": "number"},
+        {"label": "Modbus 位址", "name": "do_addr", "value": do_cfg.get("addr", 2), "input": "number"},
+        {"label": "逾時 (ms)", "name": "do_timeout_ms", "value": do_cfg.get("timeout_ms", 300), "input": "number"},
+        {"label": "重試次數", "name": "do_retries", "value": do_cfg.get("retries", 1), "input": "number"},
+        {"label": "溶氧除錯輸出", "name": "do_debug", "value": "1" if do_cfg.get("debug", False) else "0", "input": "select", "options": [("1", "啟用"), ("0", "停用")]},
     ]
 
 
@@ -200,6 +249,7 @@ def apply_sensor_form(cfg, form):
     tds = cfg.get("tds", {})
     ec_cfg = cfg.get("ec", {})
     orp_cfg = cfg.get("orp", {})
+    do_cfg = cfg.get("do", {})
 
     adc["vref"] = _to_float(form.get("adc_vref"), adc.get("vref", 3.3))
     mcp_cfg["enabled"] = _to_bool(
@@ -216,6 +266,11 @@ def apply_sensor_form(cfg, form):
     mcp_cfg["miso"] = _to_int(form.get("mcp3208_miso"), mcp_cfg.get("miso", 13))
     mcp_cfg["cs"] = _to_int(form.get("mcp3208_cs"), mcp_cfg.get("cs", 14))
     mcp_enabled = bool(mcp_cfg.get("enabled", False))
+
+    ph_type = (form.get("ph_type") or ph.get("type", "adc")).strip().lower()
+    if ph_type not in ("adc", "rs485"):
+        ph_type = "adc"
+    ph["type"] = ph_type
 
     if mcp_enabled:
         ph["ch"] = _to_int(form.get("ph_ch"), ph.get("ch", 0))
@@ -253,6 +308,23 @@ def apply_sensor_form(cfg, form):
         form.get("ph_debug"),
         ph.get("debug", False),
     )
+    rs485_cfg = ph.get("rs485", {})
+    rs485_cfg["uart_id"] = _to_int(
+        form.get("ph_rs485_uart_id"), rs485_cfg.get("uart_id", 2)
+    )
+    rs485_cfg["tx"] = _to_int(form.get("ph_rs485_tx"), rs485_cfg.get("tx", 18))
+    rs485_cfg["rx"] = _to_int(form.get("ph_rs485_rx"), rs485_cfg.get("rx", 21))
+    rs485_cfg["baudrate"] = _to_int(
+        form.get("ph_rs485_baudrate"), rs485_cfg.get("baudrate", 4800)
+    )
+    rs485_cfg["addr"] = _to_int(form.get("ph_rs485_addr"), rs485_cfg.get("addr", 3))
+    rs485_cfg["timeout_ms"] = _to_int(
+        form.get("ph_rs485_timeout_ms"), rs485_cfg.get("timeout_ms", 300)
+    )
+    rs485_cfg["retries"] = _to_int(
+        form.get("ph_rs485_retries"), rs485_cfg.get("retries", 1)
+    )
+    ph["rs485"] = rs485_cfg
 
     if mcp_enabled:
         turb["ch"] = _to_int(form.get("turbidity_ch"), turb.get("ch", 0))
@@ -349,6 +421,22 @@ def apply_sensor_form(cfg, form):
     )
     orp_cfg["debug"] = _to_bool(form.get("orp_debug"), orp_cfg.get("debug", False))
 
+    do_cfg["enabled"] = _to_bool(
+        form.get("do_enabled"), do_cfg.get("enabled", False)
+    )
+    do_cfg["uart_id"] = _to_int(form.get("do_uart_id"), do_cfg.get("uart_id", 2))
+    do_cfg["tx"] = _to_int(form.get("do_tx"), do_cfg.get("tx", 18))
+    do_cfg["rx"] = _to_int(form.get("do_rx"), do_cfg.get("rx", 21))
+    do_cfg["baudrate"] = _to_int(
+        form.get("do_baudrate"), do_cfg.get("baudrate", 4800)
+    )
+    do_cfg["addr"] = _to_int(form.get("do_addr"), do_cfg.get("addr", 2))
+    do_cfg["timeout_ms"] = _to_int(
+        form.get("do_timeout_ms"), do_cfg.get("timeout_ms", 300)
+    )
+    do_cfg["retries"] = _to_int(form.get("do_retries"), do_cfg.get("retries", 1))
+    do_cfg["debug"] = _to_bool(form.get("do_debug"), do_cfg.get("debug", False))
+
     cfg["adc"] = adc
     cfg["mcp3208"] = mcp_cfg
     cfg["ph"] = ph
@@ -358,5 +446,6 @@ def apply_sensor_form(cfg, form):
     cfg["tds"] = tds
     cfg["ec"] = ec_cfg
     cfg["orp"] = orp_cfg
+    cfg["do"] = do_cfg
     return True, "感測器設定已儲存"
 # 建立系統表單欄位
