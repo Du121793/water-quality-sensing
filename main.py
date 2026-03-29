@@ -39,6 +39,7 @@ from sensors.tds import init_tds, tds_read
 from sensors.turbidity import init_turbidity, turbidity_read
 from sensors.orp import init_orp, orp_read
 from sensors.ec import init_ec, ec_read
+from sensors.do import init_do, do_read
 from web.admin_server import AdminServer
 from modes.manager import get_mode_settings
 
@@ -96,6 +97,9 @@ def main():
         adc_tds = init_tds(cfg["tds"]["pin"])
         adc_ec = init_ec(cfg.get("ec", {}).get("pin", 0))
         adc_orp = init_orp(cfg.get("orp", {}).get("pin", 0))
+    do_cfg = cfg.get("do", {})
+    do_enabled = bool(do_cfg.get("enabled", False))
+    do_uart = init_do(do_cfg) if do_enabled else None
     ds_s, roms_s = init_ds18b20(cfg["ds18b20"]["pin_shallow"])
     ds_d, roms_d = init_ds18b20(cfg["ds18b20"]["pin_deep"])
 
@@ -305,6 +309,18 @@ def main():
             orp_v_sensor = orp.get("v_sensor")
             orp_valid = orp.get("valid")
             orp_reason = orp.get("reason")
+            do_sat = None
+            do_mg_l = None
+            do_temp_c = None
+            do_error = ""
+            if do_uart:
+                do_result = do_read(do_uart, do_cfg)
+                if do_result.get("ok"):
+                    do_sat = do_result.get("do_sat")
+                    do_mg_l = do_result.get("do_mg_l")
+                    do_temp_c = do_result.get("do_temp_c")
+                else:
+                    do_error = do_result.get("error") or ""
 
             last_sample = {
                 "t_shallow": t_shallow,
@@ -330,6 +346,10 @@ def main():
                 "orp_mv_no_offset": orp.get("orp_mv_no_offset"),
                 "orp_valid": orp_valid,
                 "orp_reason": orp_reason,
+                "do_sat": do_sat,
+                "do_mg_l": do_mg_l,
+                "do_temp_c": do_temp_c,
+                "do_error": do_error,
                 "reading_ms": now,
                 "reading_iso": reading_iso,
             }
@@ -348,6 +368,9 @@ def main():
                 agg_add(agg, "orp_mv", orp_mv)
                 agg_add(agg, "orp_v_sensor", orp_v_sensor)
                 agg_add(agg, "orp_raw", orp.get("raw"))
+            agg_add(agg, "do_sat", do_sat)
+            agg_add(agg, "do_mg_l", do_mg_l)
+            agg_add(agg, "do_temp_c", do_temp_c)
 
             status["last_reading"] = {
                 "溫度(淺)": t_shallow,
@@ -362,6 +385,9 @@ def main():
                 "ORP(V)": "NA" if orp_v_sensor is None else orp_v_sensor,
                 "MQ135(raw)": mq["raw135"],
                 "MQ137(raw)": mq["raw137"],
+                "溶氧(mg/L)": "NA" if do_mg_l is None else do_mg_l,
+                "溶氧(%)": "NA" if do_sat is None else do_sat,
+                "溶氧溫度(C)": "NA" if do_temp_c is None else do_temp_c,
             }
             status["last_reading_detail"] = {
                 "ph": ph,
@@ -389,6 +415,10 @@ def main():
                 "orp_mv_no_offset": orp.get("orp_mv_no_offset"),
                 "orp_valid": orp_valid,
                 "orp_reason": orp_reason,
+                "do_mg_l": do_mg_l,
+                "do_sat": do_sat,
+                "do_temp_c": do_temp_c,
+                "do_error": do_error,
             }
             status["last_calibration"] = {
                 "pH": cfg.get("ph", {}).get("last_calibration_iso"),
@@ -398,6 +428,7 @@ def main():
                 "TDS": cfg.get("tds", {}).get("last_calibration_iso"),
                 "EC": cfg.get("ec", {}).get("last_calibration_iso"),
                 "ORP": cfg.get("orp", {}).get("last_calibration_iso"),
+                "溶氧": cfg.get("do", {}).get("last_calibration_iso"),
             }
             status["web_mode"] = web_mode
             status["web_refresh_s"] = refresh_s
@@ -427,6 +458,9 @@ def main():
         avg_mq137 = agg_avg(agg, "mq137")
         avg_orp_mv = agg_avg(agg, "orp_mv")
         avg_orp_v = agg_avg(agg, "orp_v_sensor")
+        avg_do_sat = agg_avg(agg, "do_sat")
+        avg_do_mg_l = agg_avg(agg, "do_mg_l")
+        avg_do_temp_c = agg_avg(agg, "do_temp_c")
 
         t_shallow = avg_t_shallow if avg_t_shallow is not None else last_sample.get("t_shallow", -127.0)
         t_deep = avg_t_deep if avg_t_deep is not None else last_sample.get("t_deep", -127.0)
@@ -440,6 +474,13 @@ def main():
         mq137 = avg_mq137 if avg_mq137 is not None else last_sample.get("mq137", 0)
         orp_mv = avg_orp_mv if avg_orp_mv is not None else last_sample.get("orp_mv")
         orp_v_sensor = avg_orp_v if avg_orp_v is not None else last_sample.get("orp_v_sensor")
+        do_sat = avg_do_sat if avg_do_sat is not None else last_sample.get("do_sat")
+        do_mg_l = avg_do_mg_l if avg_do_mg_l is not None else last_sample.get("do_mg_l")
+        do_temp_c = (
+            avg_do_temp_c
+            if avg_do_temp_c is not None
+            else last_sample.get("do_temp_c")
+        )
         ph_raw = last_sample.get("ph_raw")
         ph_v = last_sample.get("ph_v")
         tds_raw = last_sample.get("tds_raw")
@@ -463,6 +504,9 @@ def main():
             "hardness": tds_ppm,
             "ec_us_cm": 0 if ec_us is None else ec_us,
             "orp_mv": 0 if orp_mv is None else orp_mv,
+            "do_mg_l": 0 if do_mg_l is None else do_mg_l,
+            "do_sat": 0 if do_sat is None else do_sat,
+            "do_temp_c": 0 if do_temp_c is None else do_temp_c,
             "mq135": mq135,
             "mq137": mq137,
             "temp_deep": t_deep,
@@ -484,6 +528,11 @@ def main():
             + "ORP(mV={},V={});".format(
                 "NA" if orp_mv is None else orp_mv,
                 "NA" if orp_v_sensor is None else orp_v_sensor,
+            )
+            + "DO(mg/L={},%={},T={});".format(
+                "NA" if do_mg_l is None else do_mg_l,
+                "NA" if do_sat is None else do_sat,
+                "NA" if do_temp_c is None else do_temp_c,
             )
             + "MQ(r135={},r137={});".format(mq135, mq137)
             + "DS(S={},D={})".format(t_shallow, t_deep),
