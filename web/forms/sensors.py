@@ -19,6 +19,12 @@ def build_sensor_fields(cfg):
     ec = cfg.get("ec", {})
     orp = cfg.get("orp", {})
     do_cfg = cfg.get("do", {})
+    relay_cfg = cfg.get("relay_cycle", {})
+    relay_sensors = relay_cfg.get("sensors", {})
+    relay_orp = relay_sensors.get("orp", {})
+    relay_ec = relay_sensors.get("ec", {})
+    relay_tds = relay_sensors.get("tds", {})
+    relay_filter = relay_cfg.get("filter", {})
     mcp_enabled = bool(mcp_cfg.get("enabled", False))
     web_cfg = cfg.get("web", {})
     base_path = "/" + web_cfg.get("base_path", "admin").strip("/")
@@ -208,6 +214,156 @@ def build_sensor_fields(cfg):
 </script></td></tr>""".format(
                 data_url=data_url
             ),
+        },
+        {"type": "section", "label": "ORP/EC/TDS 週期繼電器"},
+        {
+            "label": "週期啟用",
+            "name": "cycle_enabled",
+            "value": "1" if relay_cfg.get("enabled", False) else "0",
+            "input": "select",
+            "options": [("1", "啟用"), ("0", "停用")],
+        },
+        {
+            "label": "週期秒數",
+            "name": "cycle_s",
+            "value": relay_cfg.get("cycle_s", 60),
+            "input": "number",
+        },
+        {
+            "label": "繼電器啟動電平",
+            "name": "cycle_active_high",
+            "value": "1" if relay_cfg.get("active_high", True) else "0",
+            "input": "select",
+            "options": [("1", "高電平啟動"), ("0", "低電平啟動")],
+        },
+        {
+            "label": "校正模式保持上電",
+            "name": "cycle_keep_on_calibration",
+            "value": "1" if relay_cfg.get("keep_on_calibration", True) else "0",
+            "input": "select",
+            "options": [("1", "是"), ("0", "否")],
+        },
+        {
+            "label": "切換緩衝 (ms)",
+            "name": "cycle_gap_ms",
+            "value": relay_cfg.get("gap_ms", 300),
+            "input": "number",
+        },
+        {
+            "label": "剔除極值方法",
+            "name": "cycle_filter_method",
+            "value": relay_filter.get("method", "mad"),
+            "input": "select",
+            "options": [("mad", "MAD"), ("none", "不剔除")],
+        },
+        {
+            "label": "MAD 係數 k",
+            "name": "cycle_filter_k",
+            "value": relay_filter.get("k", 3.0),
+            "input": "number",
+            "step": "0.1",
+        },
+        {
+            "label": "最少保留筆數",
+            "name": "cycle_filter_min_valid",
+            "value": relay_filter.get("min_valid", 3),
+            "input": "number",
+        },
+        {"type": "section", "label": "ORP 週期設定"},
+        {
+            "label": "ORP 進入週期",
+            "name": "cycle_orp_use",
+            "value": "1" if relay_orp.get("use_in_cycle", True) else "0",
+            "input": "select",
+            "options": [("1", "是"), ("0", "否")],
+        },
+        {
+            "label": "ORP 繼電器 GPIO",
+            "name": "cycle_orp_gpio",
+            "value": relay_orp.get("relay_gpio", 25),
+            "input": "number",
+        },
+        {
+            "label": "ORP 穩定秒數",
+            "name": "cycle_orp_stable_s",
+            "value": relay_orp.get("stable_s", 20),
+            "input": "number",
+        },
+        {
+            "label": "ORP 取樣次數",
+            "name": "cycle_orp_sample_count",
+            "value": relay_orp.get("sample_count", 12),
+            "input": "number",
+        },
+        {
+            "label": "ORP 取樣間隔 (ms)",
+            "name": "cycle_orp_sample_interval_ms",
+            "value": relay_orp.get("sample_interval_ms", 500),
+            "input": "number",
+        },
+        {"type": "section", "label": "EC 週期設定"},
+        {
+            "label": "EC 進入週期",
+            "name": "cycle_ec_use",
+            "value": "1" if relay_ec.get("use_in_cycle", True) else "0",
+            "input": "select",
+            "options": [("1", "是"), ("0", "否")],
+        },
+        {
+            "label": "EC 繼電器 GPIO",
+            "name": "cycle_ec_gpio",
+            "value": relay_ec.get("relay_gpio", 26),
+            "input": "number",
+        },
+        {
+            "label": "EC 穩定秒數",
+            "name": "cycle_ec_stable_s",
+            "value": relay_ec.get("stable_s", 12),
+            "input": "number",
+        },
+        {
+            "label": "EC 取樣次數",
+            "name": "cycle_ec_sample_count",
+            "value": relay_ec.get("sample_count", 12),
+            "input": "number",
+        },
+        {
+            "label": "EC 取樣間隔 (ms)",
+            "name": "cycle_ec_sample_interval_ms",
+            "value": relay_ec.get("sample_interval_ms", 300),
+            "input": "number",
+        },
+        {"type": "section", "label": "TDS 週期設定"},
+        {
+            "label": "TDS 進入週期",
+            "name": "cycle_tds_use",
+            "value": "1" if relay_tds.get("use_in_cycle", True) else "0",
+            "input": "select",
+            "options": [("1", "是"), ("0", "否")],
+        },
+        {
+            "label": "TDS 繼電器 GPIO",
+            "name": "cycle_tds_gpio",
+            "value": relay_tds.get("relay_gpio", 23),
+            "input": "number",
+        },
+        {
+            "label": "TDS 穩定秒數",
+            "name": "cycle_tds_stable_s",
+            "value": relay_tds.get("stable_s", 12),
+            "input": "number",
+        },
+        {
+            "label": "TDS 取樣次數",
+            "name": "cycle_tds_sample_count",
+            "value": relay_tds.get("sample_count", 12),
+            "input": "number",
+        },
+        {
+            "label": "TDS 取樣間隔 (ms)",
+            "name": "cycle_tds_sample_interval_ms",
+            "value": relay_tds.get("sample_interval_ms", 300),
+            "input": "number",
         },
         {"type": "section", "label": "溶氧 (DO)"},
         {
@@ -421,6 +577,90 @@ def apply_sensor_form(cfg, form):
     )
     orp_cfg["debug"] = _to_bool(form.get("orp_debug"), orp_cfg.get("debug", False))
 
+    relay_cfg = cfg.get("relay_cycle", {})
+    relay_cfg["enabled"] = _to_bool(
+        form.get("cycle_enabled"), relay_cfg.get("enabled", False)
+    )
+    relay_cfg["cycle_s"] = _to_int(form.get("cycle_s"), relay_cfg.get("cycle_s", 60))
+    relay_cfg["active_high"] = _to_bool(
+        form.get("cycle_active_high"), relay_cfg.get("active_high", True)
+    )
+    relay_cfg["keep_on_calibration"] = _to_bool(
+        form.get("cycle_keep_on_calibration"),
+        relay_cfg.get("keep_on_calibration", True),
+    )
+    relay_cfg["gap_ms"] = _to_int(
+        form.get("cycle_gap_ms"), relay_cfg.get("gap_ms", 300)
+    )
+    filter_cfg = relay_cfg.get("filter", {})
+    filter_method = (
+        form.get("cycle_filter_method") or filter_cfg.get("method", "mad")
+    ).strip().lower()
+    if filter_method not in ("mad", "none"):
+        filter_method = "mad"
+    filter_cfg["method"] = filter_method
+    filter_cfg["k"] = _to_float(form.get("cycle_filter_k"), filter_cfg.get("k", 3.0))
+    filter_cfg["min_valid"] = _to_int(
+        form.get("cycle_filter_min_valid"), filter_cfg.get("min_valid", 3)
+    )
+    relay_cfg["filter"] = filter_cfg
+    relay_sensors = relay_cfg.get("sensors", {})
+    orp_cycle = relay_sensors.get("orp", {})
+    orp_cycle["use_in_cycle"] = _to_bool(
+        form.get("cycle_orp_use"), orp_cycle.get("use_in_cycle", True)
+    )
+    orp_cycle["relay_gpio"] = _to_int(
+        form.get("cycle_orp_gpio"), orp_cycle.get("relay_gpio", 25)
+    )
+    orp_cycle["stable_s"] = _to_int(
+        form.get("cycle_orp_stable_s"), orp_cycle.get("stable_s", 20)
+    )
+    orp_cycle["sample_count"] = _to_int(
+        form.get("cycle_orp_sample_count"), orp_cycle.get("sample_count", 12)
+    )
+    orp_cycle["sample_interval_ms"] = _to_int(
+        form.get("cycle_orp_sample_interval_ms"),
+        orp_cycle.get("sample_interval_ms", 500),
+    )
+    relay_sensors["orp"] = orp_cycle
+    ec_cycle = relay_sensors.get("ec", {})
+    ec_cycle["use_in_cycle"] = _to_bool(
+        form.get("cycle_ec_use"), ec_cycle.get("use_in_cycle", True)
+    )
+    ec_cycle["relay_gpio"] = _to_int(
+        form.get("cycle_ec_gpio"), ec_cycle.get("relay_gpio", 26)
+    )
+    ec_cycle["stable_s"] = _to_int(
+        form.get("cycle_ec_stable_s"), ec_cycle.get("stable_s", 12)
+    )
+    ec_cycle["sample_count"] = _to_int(
+        form.get("cycle_ec_sample_count"), ec_cycle.get("sample_count", 12)
+    )
+    ec_cycle["sample_interval_ms"] = _to_int(
+        form.get("cycle_ec_sample_interval_ms"),
+        ec_cycle.get("sample_interval_ms", 300),
+    )
+    relay_sensors["ec"] = ec_cycle
+    tds_cycle = relay_sensors.get("tds", {})
+    tds_cycle["use_in_cycle"] = _to_bool(
+        form.get("cycle_tds_use"), tds_cycle.get("use_in_cycle", True)
+    )
+    tds_cycle["relay_gpio"] = _to_int(
+        form.get("cycle_tds_gpio"), tds_cycle.get("relay_gpio", 23)
+    )
+    tds_cycle["stable_s"] = _to_int(
+        form.get("cycle_tds_stable_s"), tds_cycle.get("stable_s", 12)
+    )
+    tds_cycle["sample_count"] = _to_int(
+        form.get("cycle_tds_sample_count"), tds_cycle.get("sample_count", 12)
+    )
+    tds_cycle["sample_interval_ms"] = _to_int(
+        form.get("cycle_tds_sample_interval_ms"),
+        tds_cycle.get("sample_interval_ms", 300),
+    )
+    relay_sensors["tds"] = tds_cycle
+    relay_cfg["sensors"] = relay_sensors
+
     do_cfg["enabled"] = _to_bool(
         form.get("do_enabled"), do_cfg.get("enabled", False)
     )
@@ -446,6 +686,7 @@ def apply_sensor_form(cfg, form):
     cfg["tds"] = tds
     cfg["ec"] = ec_cfg
     cfg["orp"] = orp_cfg
+    cfg["relay_cycle"] = relay_cfg
     cfg["do"] = do_cfg
     return True, "感測器設定已儲存"
 # 建立系統表單欄位

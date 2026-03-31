@@ -28,6 +28,7 @@ def handle_status_data(server):
     last = server._status.get("last_reading_detail", {})
     payload = {
         "readings": server._status.get("last_reading", {}),
+        "last_powered": server._status.get("last_reading_last_powered", {}),
         "reading_ms": last.get("reading_ms"),
         "reading_iso": last.get("reading_iso"),
         "server_ms": time.ticks_ms(),
@@ -74,6 +75,7 @@ def handle_status_json(server):
         "reading_age_s": reading_age_s,
         "mem_free": gc.mem_free(),
         "readings": status.get("last_reading", {}),
+        "last_powered": status.get("last_reading_last_powered", {}),
         "calibration": status.get("last_calibration", {}),
         "server_ms": now_ms,
     }

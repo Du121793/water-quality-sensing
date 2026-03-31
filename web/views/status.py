@@ -41,12 +41,18 @@ def render_status_page(base_path, status, message, restart_required):
 
     reading_rows = ""
     readings = status.get("last_reading", {})
+    last_powered = status.get("last_reading_last_powered", {})
     for key, value in readings.items():
-        reading_rows += "<tr><th>{}</th><td data-live-key=\"{}\">{}</td></tr>".format(
-            _html_escape(key), _html_escape(key), _html_escape(value)
+        last_val = last_powered.get(key, value)
+        reading_rows += "<tr><th>{}</th><td data-live-key=\"{}\">{}</td><td data-last-key=\"{}\">{}</td></tr>".format(
+            _html_escape(key),
+            _html_escape(key),
+            _html_escape(value),
+            _html_escape(key),
+            _html_escape(last_val),
         )
     if not reading_rows:
-        reading_rows = "<tr><th>感測資料</th><td>尚無</td></tr>"
+        reading_rows = "<tr><th>感測資料</th><td colspan='2'>尚無</td></tr>"
 
     restart_hint = ""
     if restart_required:
@@ -95,6 +101,7 @@ def render_status_page(base_path, status, message, restart_required):
 <h2>感測器最新狀態</h2>
 <div class="muted">更新時間：<span id="reading-time">-</span>（<span id="reading-age">-</span> 秒前）</div>
 <table>
+  <tr><th>項目</th><th>即時</th><th>最後檢測</th></tr>
   {reading_rows}
 </table>
 <h2>上次校正時間</h2>
@@ -129,6 +136,7 @@ def render_status_page(base_path, status, message, restart_required):
           try {{
             var data = JSON.parse(xhr.responseText);
             var readings = data.readings || {{}};
+            var lastPowered = data.last_powered || {{}};
             if (data.reading_ms !== null && data.reading_ms !== undefined && data.server_ms !== null && data.server_ms !== undefined) {{
               var readingMs = Number(data.reading_ms);
               var serverMs = Number(data.server_ms);
@@ -145,6 +153,15 @@ def render_status_page(base_path, status, message, restart_required):
               var key = nodes[i].getAttribute("data-live-key");
               if (readings.hasOwnProperty(key)) {{
                 nodes[i].textContent = fmt(readings[key]);
+              }}
+            }}
+            var lastNodes = document.querySelectorAll("[data-last-key]");
+            for (var j = 0; j < lastNodes.length; j++) {{
+              var lastKey = lastNodes[j].getAttribute("data-last-key");
+              if (lastPowered.hasOwnProperty(lastKey)) {{
+                lastNodes[j].textContent = fmt(lastPowered[lastKey]);
+              }} else if (readings.hasOwnProperty(lastKey)) {{
+                lastNodes[j].textContent = fmt(readings[lastKey]);
               }}
             }}
           }} catch (e) {{}}
