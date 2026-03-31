@@ -15,7 +15,14 @@ from methods.async_sender import (
 from methods.logger import Logger
 from methods.sampling import agg_add, agg_avg, should_sample
 from methods.time_sync import sync_time
-from methods.utils import get_date_iso, get_date_iso_utc, safe_print, log_mem
+from methods.utils import (
+    get_date_iso,
+    get_date_iso_utc,
+    safe_print,
+    log_mem,
+    filter_indices_mad,
+    avg_by_indices,
+)
 from methods.wifi import connect_wifi, has_wifi_credentials, start_ap
 from methods.mcp3208 import MCP3208, MCP3208ADC
 from sensors.ds18b20 import (
@@ -148,6 +155,7 @@ def main():
         "last_http_code": None,
         "last_error": "",
         "last_reading": {},
+        "last_reading_last_powered": {},
         "wifi_connected": False,
         "ip": "",
         "wifi_mode": "",
@@ -157,6 +165,368 @@ def main():
     ap_iface = None
     if cfg.get("web", {}).get("enabled"):
         admin_server = AdminServer(cfg, status, save_config, logger=logger)
+
+    relay_cfg = cfg.get("relay_cycle", {})
+    relay_enabled = bool(relay_cfg.get("enabled", False))
+    relay_cycle_s = int(relay_cfg.get("cycle_s", 60))
+    relay_active_high = bool(relay_cfg.get("active_high", True))
+    relay_keep_on_cal = bool(relay_cfg.get("keep_on_calibration", True))
+    relay_gap_ms = int(relay_cfg.get("gap_ms", 300))
+    relay_filter_cfg = relay_cfg.get("filter", {})
+    relay_filter_method = str(relay_filter_cfg.get("method", "mad")).lower()
+    relay_filter_k = relay_filter_cfg.get("k", 3.0)
+    relay_filter_min_valid = int(relay_filter_cfg.get("min_valid", 3))
+    relay_sensors = relay_cfg.get("sensors", {})
+    relay_orp_cfg = relay_sensors.get("orp", {})
+    relay_ec_cfg = relay_sensors.get("ec", {})
+    relay_tds_cfg = relay_sensors.get("tds", {})
+
+    relay_pins = {}
+
+    # 初始化繼電器腳位
+    def _init_relay_pin(name, gpio):
+        if not isinstance(gpio, int) or gpio < 0:
+            return None
+        try:
+            pin = machine.Pin(gpio, machine.Pin.OUT)
+        except Exception as e:
+            msg = "繼電器腳位無效: {}={} ({})".format(name, gpio, e)
+            safe_print(msg)
+            try:
+                logger.log(msg)
+            except Exception:
+                pass
+            return None
+        off_val = 0 if relay_active_high else 1
+        pin.value(off_val)
+        relay_pins[name] = pin
+        return pin
+
+    _init_relay_pin("orp", relay_orp_cfg.get("relay_gpio"))
+    _init_relay_pin("ec", relay_ec_cfg.get("relay_gpio"))
+    _init_relay_pin("tds", relay_tds_cfg.get("relay_gpio"))
+
+    # 設定繼電器狀態
+    def _relay_set(name, on):
+        pin = relay_pins.get(name)
+        if not pin:
+            return
+        val = 1 if on else 0
+        if not relay_active_high:
+            val = 0 if on else 1
+        pin.value(val)
+
+    # 設定全部繼電器
+    def _relay_set_all(on):
+        for name in relay_pins:
+            _relay_set(name, on)
+
+    # 依是否輪詢設定待機繼電器狀態
+    def _relay_set_idle():
+        if not relay_enabled:
+            return
+        if relay_keep_on_cal and web_mode == "calibration":
+            _relay_set_all(True)
+            return
+        for name, cfg_item in (
+            ("orp", relay_orp_cfg),
+            ("ec", relay_ec_cfg),
+            ("tds", relay_tds_cfg),
+        ):
+            use_in_cycle = bool(cfg_item.get("use_in_cycle", True))
+            if use_in_cycle:
+                _relay_set(name, False)
+            else:
+                _relay_set(name, True)
+
+    # 判斷感測器是否啟用輪詢
+    def _relay_use_cycle(name):
+        cfg_item = relay_sensors.get(name, {})
+        return bool(cfg_item.get("use_in_cycle", True))
+
+    # 判斷是否需要輪詢控制
+    def _relay_is_cycle_target(name):
+        return relay_enabled and web_mode == "normal" and _relay_use_cycle(name)
+
+    # 判斷繼電器是否通電
+    def _relay_is_on(name):
+        if not _relay_is_cycle_target(name):
+            return True
+        return relay_cycle_state.get("active") == name
+
+    # 依通電狀態轉換顯示值
+    def _relay_display_value(name, value):
+        if not _relay_is_cycle_target(name):
+            return value
+        if _relay_is_on(name):
+            return value if value is not None else "NA"
+        return "未通電"
+
+    # 依通電狀態轉換有效旗標
+    def _relay_display_valid(name, value):
+        if not _relay_is_cycle_target(name):
+            return value
+        return bool(value) if _relay_is_on(name) else False
+
+    # 依通電狀態轉換原因
+    def _relay_display_reason(name, value):
+        if not _relay_is_cycle_target(name):
+            return value
+        if _relay_is_on(name):
+            return value or ""
+        return "relay_off"
+
+    # 輪詢期間更新即時顯示
+    def _update_relay_status(force=False):
+        readings = status.get("last_reading", {})
+        details = status.get("last_reading_detail", {})
+        if not readings and not details:
+            return
+        now_ms = time.ticks_ms()
+        last_ms = relay_cycle_state.get("last_status_ms")
+        if (
+            not force
+            and last_ms is not None
+            and time.ticks_diff(now_ms, last_ms) < 1000
+        ):
+            return
+        relay_cycle_state["last_status_ms"] = now_ms
+        reading_iso = get_date_iso(cfg["time"]["timezone_offset_s"])
+        tds_cache = relay_cycle_state.get("cache", {}).get("tds", {})
+        ec_cache = relay_cycle_state.get("cache", {}).get("ec", {})
+        orp_cache = relay_cycle_state.get("cache", {}).get("orp", {})
+
+        readings["TDS(ppm)"] = _relay_display_value("tds", tds_cache.get("ppm"))
+        readings["EC(uS/cm)"] = _relay_display_value("ec", ec_cache.get("us"))
+        readings["ORP(mV)"] = _relay_display_value("orp", orp_cache.get("mv"))
+        readings["ORP(V)"] = _relay_display_value("orp", orp_cache.get("v_sensor"))
+
+        details["tds_ppm"] = _relay_display_value("tds", tds_cache.get("ppm"))
+        details["tds_raw"] = _relay_display_value("tds", tds_cache.get("raw"))
+        details["tds_v"] = _relay_display_value("tds", tds_cache.get("v"))
+        details["ec_us"] = _relay_display_value("ec", ec_cache.get("us"))
+        details["ec_raw"] = _relay_display_value("ec", ec_cache.get("raw"))
+        details["ec_v"] = _relay_display_value("ec", ec_cache.get("v"))
+        details["orp_mv"] = _relay_display_value("orp", orp_cache.get("mv"))
+        details["orp_raw"] = _relay_display_value("orp", orp_cache.get("raw"))
+        details["orp_v_adc"] = _relay_display_value("orp", orp_cache.get("v_adc"))
+        details["orp_v_sensor"] = _relay_display_value("orp", orp_cache.get("v_sensor"))
+        details["orp_mv_no_offset"] = _relay_display_value(
+            "orp", orp_cache.get("mv_no_offset")
+        )
+        details["orp_valid"] = _relay_display_valid(
+            "orp", orp_cache.get("valid")
+        )
+        details["orp_reason"] = _relay_display_reason(
+            "orp", orp_cache.get("reason")
+        )
+        details["reading_ms"] = now_ms
+        details["reading_iso"] = reading_iso
+        status["last_reading"] = readings
+        status["last_reading_detail"] = details
+        last_powered = status.get("last_reading_last_powered", {})
+        last_values = relay_cycle_state.get("last_values", {})
+        tds_last = last_values.get("tds", {})
+        ec_last = last_values.get("ec", {})
+        orp_last = last_values.get("orp", {})
+        if "ppm" in tds_last:
+            last_powered["TDS(ppm)"] = tds_last.get("ppm")
+        if "us" in ec_last:
+            last_powered["EC(uS/cm)"] = ec_last.get("us")
+        if "mv" in orp_last:
+            last_powered["ORP(mV)"] = orp_last.get("mv")
+        if "v_sensor" in orp_last:
+            last_powered["ORP(V)"] = orp_last.get("v_sensor")
+        status["last_reading_last_powered"] = last_powered
+
+    # 等待時維持 web polling
+    def _sleep_poll_ms(ms):
+        if ms <= 0:
+            return
+        end = time.ticks_add(time.ticks_ms(), int(ms))
+        while time.ticks_diff(end, time.ticks_ms()) > 0:
+            if admin_server:
+                admin_server.poll()
+            _update_relay_status()
+            time.sleep_ms(100)
+
+    # 計算取樣窗秒數
+    def _sample_window_s(sample_count, interval_ms):
+        if not isinstance(sample_count, int) or sample_count <= 0:
+            return 0.0
+        if not isinstance(interval_ms, int) or interval_ms < 0:
+            return 0.0
+        return (sample_count * interval_ms) / 1000.0
+
+    # 依設定剔除極值
+    def _filter_indices(values):
+        if relay_filter_method == "mad":
+            return filter_indices_mad(values, relay_filter_k, relay_filter_min_valid)
+        return [i for i, v in enumerate(values) if isinstance(v, (int, float))]
+
+    # 取樣 TDS
+    def _sample_tds(temp_c):
+        sample_count = int(relay_tds_cfg.get("sample_count", 12))
+        interval_ms = int(relay_tds_cfg.get("sample_interval_ms", 300))
+        values = []
+        raw_values = []
+        v_values = []
+        for _ in range(sample_count):
+            ppm, raw, v = tds_read(
+                adc_tds,
+                temp_c,
+                cfg["tds"]["vref"],
+                cfg["tds"]["temp_compensation_factor"],
+                cfg["tds"]["k_factor"],
+            )
+            values.append(ppm)
+            raw_values.append(raw)
+            v_values.append(v)
+            _sleep_poll_ms(interval_ms)
+        idxs = _filter_indices(values)
+        ppm_avg = avg_by_indices(values, idxs)
+        raw_avg = avg_by_indices(raw_values, idxs)
+        v_avg = avg_by_indices(v_values, idxs)
+        return {
+            "ppm": round(ppm_avg, 2) if ppm_avg is not None else None,
+            "raw": int(raw_avg) if raw_avg is not None else None,
+            "v": round(v_avg, 3) if v_avg is not None else None,
+        }
+
+    # 取樣 EC
+    def _sample_ec():
+        sample_count = int(relay_ec_cfg.get("sample_count", 12))
+        interval_ms = int(relay_ec_cfg.get("sample_interval_ms", 300))
+        values = []
+        raw_values = []
+        v_values = []
+        for _ in range(sample_count):
+            ec = ec_read(adc_ec, cfg.get("ec", {}), adc_vref)
+            values.append(ec.get("ec_us"))
+            raw_values.append(ec.get("raw"))
+            v_values.append(ec.get("v"))
+            _sleep_poll_ms(interval_ms)
+        idxs = _filter_indices(values)
+        us_avg = avg_by_indices(values, idxs)
+        raw_avg = avg_by_indices(raw_values, idxs)
+        v_avg = avg_by_indices(v_values, idxs)
+        return {
+            "us": round(us_avg, 2) if us_avg is not None else None,
+            "raw": int(raw_avg) if raw_avg is not None else None,
+            "v": round(v_avg, 3) if v_avg is not None else None,
+        }
+
+    # 取樣 ORP
+    def _sample_orp():
+        sample_count = int(relay_orp_cfg.get("sample_count", 12))
+        interval_ms = int(relay_orp_cfg.get("sample_interval_ms", 500))
+        mv_values = []
+        raw_values = []
+        v_adc_values = []
+        v_sensor_values = []
+        mv_no_offset_values = []
+        last_reason = ""
+        for _ in range(sample_count):
+            orp = orp_read(adc_orp, cfg.get("orp", {}), adc_vref)
+            if orp.get("valid"):
+                mv_values.append(orp.get("orp_mv"))
+                raw_values.append(orp.get("raw"))
+                v_adc_values.append(orp.get("v_adc"))
+                v_sensor_values.append(orp.get("v_sensor"))
+                mv_no_offset_values.append(orp.get("orp_mv_no_offset"))
+            else:
+                last_reason = orp.get("reason") or last_reason
+            _sleep_poll_ms(interval_ms)
+        if not mv_values:
+            return {
+                "mv": None,
+                "raw": None,
+                "v_adc": None,
+                "v_sensor": None,
+                "mv_no_offset": None,
+                "valid": False,
+                "reason": last_reason or "no_valid_samples",
+            }
+        idxs = _filter_indices(mv_values)
+        mv_avg = avg_by_indices(mv_values, idxs)
+        raw_avg = avg_by_indices(raw_values, idxs)
+        v_adc_avg = avg_by_indices(v_adc_values, idxs)
+        v_sensor_avg = avg_by_indices(v_sensor_values, idxs)
+        mv_no_offset_avg = avg_by_indices(mv_no_offset_values, idxs)
+        return {
+            "mv": round(mv_avg, 2) if mv_avg is not None else None,
+            "raw": int(raw_avg) if raw_avg is not None else None,
+            "v_adc": round(v_adc_avg, 3) if v_adc_avg is not None else None,
+            "v_sensor": round(v_sensor_avg, 3) if v_sensor_avg is not None else None,
+            "mv_no_offset": round(mv_no_offset_avg, 2)
+            if mv_no_offset_avg is not None
+            else None,
+            "valid": mv_avg is not None,
+            "reason": "",
+        }
+
+    # 執行 ORP/EC/TDS 輪詢週期
+    def _run_relay_cycle(temp_for_ph_tds):
+        sensors = [("orp", relay_orp_cfg), ("ec", relay_ec_cfg), ("tds", relay_tds_cfg)]
+        total_sample_s = 0.0
+        total_stable_s = 0.0
+        for name, cfg_item in sensors:
+            if not bool(cfg_item.get("use_in_cycle", True)):
+                continue
+            stable_s = int(cfg_item.get("stable_s", 0))
+            sample_count = int(cfg_item.get("sample_count", 0))
+            interval_ms = int(cfg_item.get("sample_interval_ms", 0))
+            total_stable_s += stable_s
+            total_sample_s += _sample_window_s(sample_count, interval_ms) + (relay_gap_ms / 1000.0)
+        stable_scale = 1.0
+        if relay_cycle_s > 0 and total_sample_s < relay_cycle_s and total_stable_s > 0:
+            stable_scale = min(1.0, (relay_cycle_s - total_sample_s) / total_stable_s)
+        elif relay_cycle_s > 0 and total_sample_s >= relay_cycle_s:
+            stable_scale = 0.0
+            safe_print(
+                "Relay cycle: sample window {:.1f}s exceeds cycle {}".format(
+                    total_sample_s, relay_cycle_s
+                )
+            )
+        if stable_scale < 1.0:
+            safe_print("Relay cycle: stable scale {:.2f}".format(stable_scale))
+
+        relay_cycle_state["cache"] = {"orp": {}, "ec": {}, "tds": {}}
+        relay_cycle_state["active"] = None
+        relay_cycle_state["last_status_ms"] = None
+        results = {"orp": {}, "ec": {}, "tds": {}}
+        for name, cfg_item in sensors:
+            if not bool(cfg_item.get("use_in_cycle", True)):
+                continue
+            stable_s = int(cfg_item.get("stable_s", 0) * stable_scale)
+            relay_cycle_state["active"] = name
+            _update_relay_status(force=True)
+            _relay_set_idle()
+            _relay_set(name, True)
+            _sleep_poll_ms(stable_s * 1000)
+            if name == "orp":
+                results["orp"] = _sample_orp()
+            elif name == "ec":
+                results["ec"] = _sample_ec()
+            elif name == "tds":
+                results["tds"] = _sample_tds(temp_for_ph_tds)
+            relay_cycle_state["cache"][name] = results.get(name, {})
+            relay_cycle_state["last_values"][name] = results.get(name, {})
+            _update_relay_status(force=True)
+            _relay_set(name, False)
+            relay_cycle_state["active"] = None
+            _update_relay_status(force=True)
+            _sleep_poll_ms(relay_gap_ms)
+        _relay_set_idle()
+        return results
+
+    relay_cycle_state = {
+        "last_ms": None,
+        "cache": {"orp": {}, "ec": {}, "tds": {}},
+        "last_values": {"orp": {}, "ec": {}, "tds": {}},
+        "active": None,
+        "last_status_ms": None,
+    }
 
     last_transmission = 0
     last_send_ms = None
@@ -323,6 +693,17 @@ def main():
             else:
                 temp_for_ph_tds = 25.0
 
+            if relay_enabled and web_mode == "normal":
+                if relay_cycle_state["last_ms"] is None or time.ticks_diff(
+                    now, relay_cycle_state["last_ms"]
+                ) >= relay_cycle_s * 1000:
+                    relay_cycle_state["cache"] = _run_relay_cycle(temp_for_ph_tds)
+                    relay_cycle_state["last_ms"] = now
+                else:
+                    _relay_set_idle()
+            elif relay_enabled and relay_keep_on_cal and web_mode == "calibration":
+                _relay_set_all(True)
+
             if ph_type == "rs485":
                 ph_result = ph_rs485_read(ph_uart, ph_cfg)
                 if ph_result.get("ok"):
@@ -348,20 +729,55 @@ def main():
             turb_percent = turb.get("percent")
             turb_ntu = turb.get("ntu")
             mq = mq_read(adc135, adc137, cal_file)
-            tds_ppm, tds_raw, tds_v = tds_read(
-                adc_tds,
-                temp_for_ph_tds,
-                cfg["tds"]["vref"],
-                cfg["tds"]["temp_compensation_factor"],
-                cfg["tds"]["k_factor"],
-            )
-            ec = ec_read(adc_ec, cfg.get("ec", {}), adc_vref)
-            ec_us = ec.get("ec_us")
-            orp = orp_read(adc_orp, cfg.get("orp", {}), adc_vref)
-            orp_mv = orp.get("orp_mv")
-            orp_v_sensor = orp.get("v_sensor")
-            orp_valid = orp.get("valid")
-            orp_reason = orp.get("reason")
+            if relay_enabled and web_mode == "normal" and bool(
+                relay_tds_cfg.get("use_in_cycle", True)
+            ):
+                tds_cache = relay_cycle_state["cache"].get("tds", {})
+                tds_ppm = tds_cache.get("ppm")
+                tds_raw = tds_cache.get("raw")
+                tds_v = tds_cache.get("v")
+            else:
+                tds_ppm, tds_raw, tds_v = tds_read(
+                    adc_tds,
+                    temp_for_ph_tds,
+                    cfg["tds"]["vref"],
+                    cfg["tds"]["temp_compensation_factor"],
+                    cfg["tds"]["k_factor"],
+                )
+
+            if relay_enabled and web_mode == "normal" and bool(
+                relay_ec_cfg.get("use_in_cycle", True)
+            ):
+                ec_cache = relay_cycle_state["cache"].get("ec", {})
+                ec_us = ec_cache.get("us")
+                ec_raw = ec_cache.get("raw")
+                ec_v = ec_cache.get("v")
+            else:
+                ec = ec_read(adc_ec, cfg.get("ec", {}), adc_vref)
+                ec_us = ec.get("ec_us")
+                ec_raw = ec.get("raw")
+                ec_v = ec.get("v")
+
+            if relay_enabled and web_mode == "normal" and bool(
+                relay_orp_cfg.get("use_in_cycle", True)
+            ):
+                orp_cache = relay_cycle_state["cache"].get("orp", {})
+                orp_mv = orp_cache.get("mv")
+                orp_raw = orp_cache.get("raw")
+                orp_v_adc = orp_cache.get("v_adc")
+                orp_v_sensor = orp_cache.get("v_sensor")
+                orp_mv_no_offset = orp_cache.get("mv_no_offset")
+                orp_valid = bool(orp_cache.get("valid", False))
+                orp_reason = orp_cache.get("reason", "")
+            else:
+                orp = orp_read(adc_orp, cfg.get("orp", {}), adc_vref)
+                orp_mv = orp.get("orp_mv")
+                orp_raw = orp.get("raw")
+                orp_v_adc = orp.get("v_adc")
+                orp_v_sensor = orp.get("v_sensor")
+                orp_mv_no_offset = orp.get("orp_mv_no_offset")
+                orp_valid = orp.get("valid")
+                orp_reason = orp.get("reason")
             do_sat = None
             do_mg_l = None
             do_temp_c = None
@@ -395,10 +811,11 @@ def main():
                 "temp_for_ph_tds": temp_for_ph_tds,
                 "ph_temp": ph_temp,
                 "ph_error": ph_error,
-                "ec_raw": ec.get("raw"),
-                "ec_v": ec.get("v"),
-                "orp_raw": orp.get("raw"),
-                "orp_mv_no_offset": orp.get("orp_mv_no_offset"),
+                "ec_raw": ec_raw,
+                "ec_v": ec_v,
+                "orp_raw": orp_raw,
+                "orp_mv_no_offset": orp_mv_no_offset,
+                "orp_v_adc": orp_v_adc,
                 "orp_valid": orp_valid,
                 "orp_reason": orp_reason,
                 "do_sat": do_sat,
@@ -408,6 +825,20 @@ def main():
                 "reading_ms": now,
                 "reading_iso": reading_iso,
             }
+
+            tds_ppm_display = _relay_display_value("tds", tds_ppm)
+            tds_raw_display = _relay_display_value("tds", tds_raw)
+            tds_v_display = _relay_display_value("tds", tds_v)
+            ec_us_display = _relay_display_value("ec", ec_us)
+            ec_raw_display = _relay_display_value("ec", ec_raw)
+            ec_v_display = _relay_display_value("ec", ec_v)
+            orp_mv_display = _relay_display_value("orp", orp_mv)
+            orp_raw_display = _relay_display_value("orp", orp_raw)
+            orp_v_adc_display = _relay_display_value("orp", orp_v_adc)
+            orp_v_sensor_display = _relay_display_value("orp", orp_v_sensor)
+            orp_mv_no_offset_display = _relay_display_value("orp", orp_mv_no_offset)
+            orp_valid_display = _relay_display_valid("orp", orp_valid)
+            orp_reason_display = _relay_display_reason("orp", orp_reason)
 
             agg_add(agg, "t_shallow", t_shallow)
             agg_add(agg, "t_deep", t_deep)
@@ -422,7 +853,7 @@ def main():
             if orp_valid:
                 agg_add(agg, "orp_mv", orp_mv)
                 agg_add(agg, "orp_v_sensor", orp_v_sensor)
-                agg_add(agg, "orp_raw", orp.get("raw"))
+                agg_add(agg, "orp_raw", orp_raw)
             agg_add(agg, "do_sat", do_sat)
             agg_add(agg, "do_mg_l", do_mg_l)
             agg_add(agg, "do_temp_c", do_temp_c)
@@ -435,16 +866,31 @@ def main():
                 "濁度(raw)": turb_raw,
                 "清澈度(%)": "NA" if turb_percent is None else turb_percent,
                 "濁度(NTU)": "NA" if turb_ntu is None else turb_ntu,
-                "TDS(ppm)": tds_ppm,
-                "EC(uS/cm)": "NA" if ec_us is None else ec_us,
-                "ORP(mV)": "NA" if orp_mv is None else orp_mv,
-                "ORP(V)": "NA" if orp_v_sensor is None else orp_v_sensor,
+                "TDS(ppm)": tds_ppm_display,
+                "EC(uS/cm)": "NA" if ec_us_display is None else ec_us_display,
+                "ORP(mV)": "NA" if orp_mv_display is None else orp_mv_display,
+                "ORP(V)": "NA" if orp_v_sensor_display is None else orp_v_sensor_display,
                 "MQ135(raw)": mq["raw135"],
                 "MQ137(raw)": mq["raw137"],
                 "溶氧(mg/L)": "NA" if do_mg_l is None else do_mg_l,
                 "溶氧(%)": "NA" if do_sat is None else do_sat,
                 "溶氧溫度(C)": "NA" if do_temp_c is None else do_temp_c,
             }
+            last_powered = dict(status["last_reading"])
+            relay_last = relay_cycle_state.get("last_values", {})
+            tds_last = relay_last.get("tds", {})
+            ec_last = relay_last.get("ec", {})
+            orp_last = relay_last.get("orp", {})
+            if "ppm" in tds_last:
+                last_powered["TDS(ppm)"] = tds_last.get("ppm")
+            if "us" in ec_last:
+                last_powered["EC(uS/cm)"] = ec_last.get("us")
+            if "mv" in orp_last:
+                last_powered["ORP(mV)"] = orp_last.get("mv")
+            if "v_sensor" in orp_last:
+                last_powered["ORP(V)"] = orp_last.get("v_sensor")
+            status["last_reading_last_powered"] = last_powered
+
             status["last_reading_detail"] = {
                 "ph": ph,
                 "ph_raw": ph_raw,
@@ -455,24 +901,24 @@ def main():
                 "turbidity_percent": turb_percent,
                 "turbidity_ntu": turb_ntu,
                 "turbidity_v": turb.get("v"),
-                "tds_raw": tds_raw,
-                "tds_v": tds_v,
-                "tds_ppm": tds_ppm,
+                "tds_raw": tds_raw_display,
+                "tds_v": tds_v_display,
+                "tds_ppm": tds_ppm_display,
                 "temp_for_ph_tds": temp_for_ph_tds,
                 "temp_shallow": t_shallow,
                 "temp_deep": t_deep,
                 "reading_ms": now,
                 "reading_iso": reading_iso,
-                "ec_raw": ec.get("raw"),
-                "ec_v": ec.get("v"),
-                "ec_us": ec_us,
-                "orp_raw": orp.get("raw"),
-                "orp_v_adc": orp.get("v_adc"),
-                "orp_v_sensor": orp_v_sensor,
-                "orp_mv": orp_mv,
-                "orp_mv_no_offset": orp.get("orp_mv_no_offset"),
-                "orp_valid": orp_valid,
-                "orp_reason": orp_reason,
+                "ec_raw": ec_raw_display,
+                "ec_v": ec_v_display,
+                "ec_us": ec_us_display,
+                "orp_raw": orp_raw_display,
+                "orp_v_adc": orp_v_adc_display,
+                "orp_v_sensor": orp_v_sensor_display,
+                "orp_mv": orp_mv_display,
+                "orp_mv_no_offset": orp_mv_no_offset_display,
+                "orp_valid": orp_valid_display,
+                "orp_reason": orp_reason_display,
                 "do_mg_l": do_mg_l,
                 "do_sat": do_sat,
                 "do_temp_c": do_temp_c,
