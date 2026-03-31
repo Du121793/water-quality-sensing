@@ -75,3 +75,52 @@ def check_power_stability(pin, samples=5, delay_ms=10, max_delta=100):
         return True
     except Exception:
         return False
+
+
+# 計算中位數
+def median(values):
+    nums = [v for v in values if isinstance(v, (int, float))]
+    if not nums:
+        return None
+    nums.sort()
+    mid = len(nums) // 2
+    if len(nums) % 2 == 1:
+        return float(nums[mid])
+    return (nums[mid - 1] + nums[mid]) / 2.0
+
+
+# 以 MAD 方式取得保留索引
+def filter_indices_mad(values, k=3.0, min_valid=3):
+    indexed = [(i, v) for i, v in enumerate(values) if isinstance(v, (int, float))]
+    if not indexed:
+        return []
+    if not isinstance(k, (int, float)) or k <= 0:
+        return [i for i, _ in indexed]
+    med = median([v for _, v in indexed])
+    if med is None:
+        return [i for i, _ in indexed]
+    devs = [abs(v - med) for _, v in indexed]
+    mad = median(devs)
+    if mad is None or mad == 0:
+        return [i for i, _ in indexed]
+    threshold = k * 1.4826 * mad
+    kept = [i for i, v in indexed if abs(v - med) <= threshold]
+    if len(kept) < int(min_valid):
+        return [i for i, _ in indexed]
+    return kept
+
+
+# 依索引計算平均值
+def avg_by_indices(values, indices):
+    total = 0.0
+    count = 0
+    for idx in indices:
+        if idx < 0 or idx >= len(values):
+            continue
+        v = values[idx]
+        if isinstance(v, (int, float)):
+            total += float(v)
+            count += 1
+    if count == 0:
+        return None
+    return total / count
