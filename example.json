@@ -1,0 +1,267 @@
+{
+  "wifi": {
+    "primary": {
+      "ssid": "YOUR_WIFI_SSID",
+      "password": "replace_with_local_secret"
+    },
+    "backup": {
+      "ssid": "YOUR_WIFI_SSID",
+      "password": "replace_with_local_secret"
+    },
+    "use_static_ip": false,
+    "static_ifcfg": [
+      "192.168.1.123",
+      "255.255.255.0",
+      "192.168.1.1",
+      "8.8.8.8"
+    ],
+    "ap": {
+      "ssid": "ESP32_SETUP",
+      "password": "replace_with_local_secret",
+      "channel": 1,
+      "hidden": false,
+      "force_open": true,
+      "ifcfg": [
+        "192.168.4.1",
+        "255.255.255.0",
+        "192.168.4.1",
+        "8.8.8.8"
+      ]
+    },
+    "max_failures": 5,
+    "max_connection_attempts": 10,
+    "reset_after_failures": 3
+  },
+  "api": {
+    "endpoint": "http://192.0.2.1:3002",
+    "routes": {
+      "include": "/include",
+      "maintain_record": "/maintainRecord",
+      "crash_report": "/crashReport"
+    },
+    "headers": {
+      "Content-Type": "application/json",
+      "Connection": "close",
+      "Authorization": "replace_with_local_secret"
+    },
+    "post_timeout_s": 30,
+    "max_retry_interval_s": 5,
+    "max_retries": 6,
+    "ssl_retry_max_s": 6,
+    "async_enabled": true,
+    "async_queue_size": 1,
+    "async_worker_sleep_ms": 50,
+    "async_drop_oldest": true
+  },
+  "intervals": {
+    "data_interval_s": 30,
+    "sample_interval_s": 1,
+    "wifi_quiet_s": 3
+  },
+  "watchdog": {
+    "no_success_reset_ms": 300000
+  },
+  "log": {
+    "enabled": true,
+    "file": "logs.txt",
+    "max_lines": 30000,
+    "trim_to_lines": 10000,
+    "view_lines": 2000,
+    "view_max_chars": 4096
+  },
+  "web": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 80,
+    "base_path": "admin",
+    "mode": "normal",
+    "dev_interval_s": 1,
+    "dev_refresh_s": 1,
+    "max_request_size": 8192
+  },
+  "admin": {
+    "password_salt": "",
+    "password_hash": "",
+    "session_ttl_s": 1800
+  },
+  "time": {
+    "timezone_offset_s": 28800,
+    "ntp_host": "pool.ntp.org",
+    "http_hosts": [
+      "connectivitycheck.gstatic.com",
+      "example.com",
+      "google.com",
+      "cloudflare.com"
+    ]
+  },
+  "calibration": {
+    "file": "cal.json"
+  },
+  "adc": {
+    "vref": 3.3
+  },
+  "mcp3208": {
+    "enabled": false,
+    "spi_id": 2,
+    "baudrate": 1000000,
+    "sck": 12,
+    "mosi": 11,
+    "miso": 13,
+    "cs": 14
+  },
+  "ph": {
+    "type": "adc",
+    "pin": 4,
+    "ch": 0,
+    "min": 0.0,
+    "max": 14.0,
+    "smoothing_window": 5,
+    "use_code_calibration": true,
+    "calibration_voltages": {
+      "ph4": 2.38,
+      "ph7": 2.07,
+      "ph10": 1.81
+    },
+    "divider": {
+      "r_top": 15000,
+      "r_bot": 27000
+    },
+    "rs485": {
+      "uart_id": 2,
+      "tx": 18,
+      "rx": 21,
+      "baudrate": 4800,
+      "addr": 3,
+      "timeout_ms": 300,
+      "retries": 1,
+      "cal_point1": 4.0,
+      "cal_point2": 10.0
+    },
+    "last_calibration_iso": null,
+    "debug": false
+  },
+  "turbidity": {
+    "pin": 7,
+    "ch": 1,
+    "air_threshold": 120,
+    "raw0": 3194,
+    "raw_max": 0,
+    "raw1": null,
+    "ntu1": null,
+    "percent_clear_high": true,
+    "last_calibration_iso": null,
+    "debug": false
+  },
+  "mq": {
+    "pin_135": 5,
+    "pin_137": 6,
+    "ch_135": 2,
+    "ch_137": 3,
+    "last_calibration_iso": null
+  },
+  "ds18b20": {
+    "pin_shallow": 16,
+    "pin_deep": 17,
+    "shallow_offset": 0,
+    "shallow_scale": 1.0,
+    "last_calibration_iso": null
+  },
+  "tds": {
+    "pin": 8,
+    "ch": 4,
+    "vref": 3.3,
+    "temp_compensation_factor": 0.02,
+    "k_factor": 0.5,
+    "cal_ppm": null,
+    "cal_v": null,
+    "cal_temp": null,
+    "last_calibration_iso": null
+  },
+  "ec": {
+    "pin": 9,
+    "ch": 5,
+    "cal_v1": 0.105,
+    "cal_us1": 1413.0,
+    "cal_v2": 1.602,
+    "cal_us2": 12880.0,
+    "divider": {
+      "r_top": 33000,
+      "r_bot": 1000
+    },
+    "last_calibration_iso": null,
+    "debug": false
+  },
+  "orp": {
+    "pin": 10,
+    "ch": 6,
+    "divider": {
+      "r_top": 10000,
+      "r_bot": 47000
+    },
+    "scale": 1.0,
+    "offset_mv": 0.0,
+    "cal_target_mv": null,
+    "cal_v_sensor": null,
+    "cal_raw": null,
+    "sample_count": 15,
+    "delay_ms": 3,
+    "last_calibration_iso": null,
+    "debug": false
+  },
+  "relay_cycle": {
+    "enabled": true,
+    "cycle_s": 60,
+    "active_high": true,
+    "keep_on_calibration": true,
+    "gap_ms": 300,
+    "filter": {
+      "method": "mad",
+      "k": 3.0,
+      "min_valid": 3
+    },
+    "sensors": {
+      "orp": {
+        "use_in_cycle": true,
+        "relay_gpio": 2,
+        "stable_s": 20,
+        "sample_count": 12,
+        "sample_interval_ms": 500
+      },
+      "ec": {
+        "use_in_cycle": true,
+        "relay_gpio": 1,
+        "stable_s": 12,
+        "sample_count": 12,
+        "sample_interval_ms": 300
+      },
+      "tds": {
+        "use_in_cycle": true,
+        "relay_gpio": 40,
+        "stable_s": 12,
+        "sample_count": 12,
+        "sample_interval_ms": 300
+      }
+    }
+  },
+  "do": {
+    "enabled": true,
+    "uart_id": 2,
+    "tx": 18,
+    "rx": 21,
+    "baudrate": 4800,
+    "addr": 2,
+    "timeout_ms": 300,
+    "retries": 1,
+    "salinity_ppt": 0,
+    "pressure_kpa": 101.33,
+    "last_calibration_iso": null,
+    "debug": false
+  },
+  "payload": {
+    "sensor_id": "S1"
+  },
+  "debug": {
+    "mem_trace": false,
+    "mem_trace_force_gc": false
+  }
+}
