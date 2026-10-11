@@ -112,7 +112,6 @@ pH 支援校正點與電壓換算，溫度支援 offset／scale；MQ、溶氧與
 | [sensors](sensors) | 各感測器驅動、校正與換算 |
 | [modes](modes) | 操作模式選擇 |
 | [web](web) | 裝置管理 Web、路由與畫面 |
-| [AGENT.md](AGENT.md) | 設定與註解約定 |
 
 ## 驗證與故障排查
 
