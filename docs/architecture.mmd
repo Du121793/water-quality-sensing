@@ -1,0 +1,12 @@
+%% 根據此版本程式的責任與相依繪製，不代表已完成外部服務或硬體驗收
+flowchart TB
+  SENSORS["水質與環境感測器<br/>水溫 / pH / EC / ORP / 溶氧等"] --> IO["感測介面<br/>ADC / SPI / OneWire / RS485"]
+  IO --> MAIN["MicroPython 主流程<br/>取樣 / 校正 / 彙整 / 狀態"]
+  CFG["裝置設定<br/>config.json / 校正資料"] --> MAIN
+  BROWSER["設定瀏覽器<br/>STA 或設定 AP"] --> WEB["裝置 Web 管理<br/>連線 / 模式 / 校正"]
+  WEB --> CFG
+  MAIN --> SEND["HTTP 傳送<br/>背景佇列或同步重試"]
+  SEND --> WIFI["Wi-Fi STA<br/>主要 / 備用連線"]
+  WIFI --> BACKEND["外部魚塭 API<br/>量測 / 維護 / crash report"]
+  MAIN --> RELAY["繼電器輪詢<br/>穩定等待 / 取樣 / MAD"]
+  RELAY -. 輪流供電 .-> SENSORS
